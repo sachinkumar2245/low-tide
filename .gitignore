@@ -1,0 +1,92 @@
+# =====================================================================
+# LOW TIDE - .gitignore
+# Repo root = this folder. O3DE project lives in /LowTide.
+# =====================================================================
+
+# ---------- O3DE generated (never commit) ----------
+# Asset Processor product cache (rebuilt from sources)
+/LowTide/Cache/
+# Per-user settings, logs, editor layout, crash logs, asset DB
+/LowTide/user/
+# CMake build trees (all presets write under build/)
+/LowTide/build/
+/build/
+# Editor level-save backups [VERIFY folder name in 26.05]
+_savebackup/
+# Asset Processor temp / logs written outside user/
+AssetProcessorTemp/
+*.assetprocessor.log
+# Generated Python bytecode in project/tools
+__pycache__/
+*.py[cod]
+
+# ---------- CMake / IDE ----------
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.ipch
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+imgui.ini
+
+# ---------- Build outputs / debug artefacts ----------
+# NOTE: *.obj intentionally NOT ignored (Wavefront meshes are LFS-tracked);
+# MSVC .obj files only appear under build/, which is ignored above.
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.dmp
+*.mdmp
+*.tlog
+*.log
+*.tmp
+*.bak
+
+# ---------- Profiler captures (archive manually if needed) ----------
+*.rdc
+*.wpix
+*.nsight-gfxproj
+*.tracy
+*.etl
+/tests/results/**/raw/
+
+# ---------- DCC autosaves / backups ----------
+*.blend1
+*.blend2
+*.blend@
+*.spp.autosave
+*~
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Python envs ----------
+.venv/
+venv/
+
+# ---------- Local-only notes / secrets ----------
+.env
+*.local.json
+.claude/settings.local.json
+
+# ---------- DO NOT ignore (explicit reminders) ----------
+# *.assetinfo   -> scene/texture import settings: COMMIT
+# *.prefab      -> level/chunk content (JSON): COMMIT
+# *.setreg      -> settings registry: COMMIT
+# *.material    -> material instances (JSON): COMMIT
