@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "version": 4,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
   "configurePresets": [
     {
       "name": "win-vs2022",
@@ -9,13 +9,12 @@
       "architecture": { "value": "x64", "strategy": "set" },
       "binaryDir": "${sourceDir}/build/windows",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "debug;profile;release",
         "LY_UNITY_BUILD": "ON"
       }
     },
     {
       "name": "win-vs2022-mono",
-      "displayName": "Windows / VS2022 / monolithic game launcher (release builds)",
+      "displayName": "Windows / VS2022 / monolithic game launcher (release only; disables tools and tests)",
       "inherits": "win-vs2022",
       "binaryDir": "${sourceDir}/build/windows_mono",
       "cacheVariables": {
@@ -24,21 +23,20 @@
     },
     {
       "name": "win-vs2022-asan",
-      "displayName": "Windows / VS2022 / AddressSanitizer (debug only)",
+      "displayName": "Windows / VS2022 / AddressSanitizer",
       "inherits": "win-vs2022",
       "binaryDir": "${sourceDir}/build/windows_asan",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "debug",
         "LY_UNITY_BUILD": "OFF",
-        "CMAKE_CXX_FLAGS_INIT": "/fsanitize=address"
+        "LY_BUILD_WITH_ADDRESS_SANITIZER": "ON"
       }
     }
   ],
   "buildPresets": [
     { "name": "debug",   "configurePreset": "win-vs2022", "configuration": "debug",   "targets": ["Editor", "LowTide.GameLauncher"] },
-    { "name": "profile", "configurePreset": "win-vs2022", "configuration": "profile", "targets": ["Editor", "LowTide.GameLauncher", "AssetProcessorBatch"] },
+    { "name": "profile", "configurePreset": "win-vs2022", "configuration": "profile", "targets": ["Editor", "LowTide.GameLauncher", "AssetProcessor", "AssetProcessorBatch"] },
     { "name": "release", "configurePreset": "win-vs2022-mono", "configuration": "release", "targets": ["LowTide.GameLauncher"] },
-    { "name": "asan",    "configurePreset": "win-vs2022-asan", "configuration": "debug", "targets": ["LowTide.GameLauncher"] }
+    { "name": "asan",    "configurePreset": "win-vs2022-asan", "configuration": "debug", "targets": ["LowTide.GameLauncher", "LowTideStreaming.Tests"] }
   ],
   "testPresets": [
     {
@@ -46,7 +44,7 @@
       "configurePreset": "win-vs2022",
       "configuration": "profile",
       "output": { "outputOnFailure": true },
-      "filter": { "include": { "name": "LowTide" } }
+      "filter": { "include": { "name": "LowTide", "label": "SUITE_main" } }
     }
   ]
 }

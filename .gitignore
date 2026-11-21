@@ -36,7 +36,6 @@ compile_commands.json
 *.VC.opendb
 *.ipch
 .idea/
-.vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
 imgui.ini
@@ -81,7 +80,6 @@ desktop.ini
 venv/
 
 # ---------- Local-only notes / secrets ----------
-.env
 *.local.json
 .claude/settings.local.json
 
@@ -90,3 +88,5 @@ venv/
 # *.prefab      -> level/chunk content (JSON): COMMIT
 # *.setreg      -> settings registry: COMMIT
 # *.material    -> material instances (JSON): COMMIT
+config.bat
+node_modules

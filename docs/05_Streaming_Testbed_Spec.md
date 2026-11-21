@@ -21,7 +21,7 @@ Labels: **[T]** = tunable/threshold to confirm in P2. **[VERIFY]** = engine clai
 |---|---|---|---|
 | 1. Layout + content description | `tools/testbed_gen/generate_testbed.py` (stdlib Python, seeded, deterministic) | Neutral JSON per chunk-layer: boxes, ramps and planes (transform, size, layer, collidable, occluder flag), lights, portals, variant sites, stable IDs | No engine-schema dependency. Diffable. Fast to regenerate |
 | 2a. Bulk layers (S, D, H1) | Same script | `.ltchunk` **source** JSON (our own format), consumed by our ChunkData AssetBuilder | Our format, no risk |
-| 2b. Prefab layers (G, I, cells) | `tools/testbed_gen/editor_build_prefabs.py`, run inside the Editor via Editor Python bindings (`azlmbr`) [VERIFY EditorPythonBindings API for entity creation and prefab save in 26.05] | `PF_Chunk_X###_Y###_<Layer>.prefab` | Creating prefabs through the editor API stays correct if the `.prefab` JSON schema changes. **Rejected:** writing `.prefab` JSON by hand from Python (undocumented schema, churn) [VERIFY prefab JSON schema stability] |
+| 2b. Prefab layers (G, I, cells) | `tools/testbed_gen/editor_build_prefabs.py`, run inside the Editor via Editor Python bindings (`azlmbr`). Verified bindings: `ToolsApplicationRequestBus.CreateNewEntity`, `EditorComponentAPIBus.AddComponentsOfType`, `PrefabPublicRequestBus.CreatePrefabInMemory`, `PrefabLoaderScriptingBus.SaveTemplateToString` (✔ V-34). **There is no direct save-to-disk binding**, so the script writes the returned string to `PF_…prefab` itself | `PF_Chunk_X###_Y###_<Layer>.prefab` | The editor produces the JSON, so it stays correct across schema changes. **Rejected:** hand-writing `.prefab` JSON (undocumented schema, churn) |
 
 Primitive assets (authored once by hand or by a Blender script, all graybox):
 - `SM_TB_Box_1m` with 4 LODs (LOD0 = a 12-tri cube, padded to class tri counts with bevel subdivisions so LOD budgets are exercised realistically).
@@ -32,9 +32,9 @@ Primitive assets (authored once by hand or by a Blender script, all graybox):
 
 | Zone | Chunks | Profile | Contents | Validates |
 |---|---|---|---|---|
-| **Z1 Dense urban** | X08–X15, Y16–Y23 (8×8 = 1.05 km²) | Dense urban @100% | 128 m blocks, 15 m streets. Box buildings 10–60 m tall from 8 "kit" box variants. ≥ 8 occluder planes per chunk. 600 G entities + 4 000 bulk per chunk. 24 unshadowed + 2 shadowed lights | Occlusion, entity activation cost, draw budgets |
-| **Z2 Industrial** | X16–X23, Y16–Y21 (8×6) | Industrial @100% | 30×60 m sheds, bulk container stacks | Bulk path at scale |
-| **Z3 Rural** | X04–X15, Y04–Y13 (12×10) | Rural @100% | Noise-height terrain tiles (±20 m, seeded). 6 000 bulk tree proxies per chunk. Sparse sheds | Terrain LOD rings, vegetation LOD/impostors, H1 at range |
+| **Z1 Dense urban** | X08–X15, Y16–Y23 (8×8 = 1.05 km²) | Dense urban @100% | 128 m blocks, 15 m streets. Box buildings 10–60 m tall from 8 "kit" box variants, **merged by the builder into ≤ 200 sections per chunk**. ≥ 8 occluder planes per chunk. 600 G entities + 250 instanced D props per chunk. 24 unshadowed + 2 shadowed lights | Occlusion, spawn-batch cost, mesh-handle cost, draw budgets |
+| **Z2 Industrial** | X16–X23, Y16–Y21 (8×6) | Industrial @100% | 30×60 m sheds; container stacks as instanced D handles (≤ 200/chunk) | Instancing path at scale (`r_meshInstancingEnabled`) |
+| **Z3 Rural** | X04–X15, Y04–Y13 (12×10) | Rural @100% | Noise-height terrain tiles (±20 m, seeded; ring LOD forced via `SpecificLod`). ≤ 400 instanced tree handles + merged vegetation clusters per chunk. Sparse sheds | Terrain ring LOD, vegetation LOD, H1 at range |
 | **Z4 Open water** | X24–X27, Y24–Y27 (4×4) | Water | Water-only chunks + anchored "vessel" proxy (120×25×30 m box stack) with 1 airlock cell | Boat path, open-water H1/H2, airlock |
 | **H1 Stress highway** | Row Y08, X00→X31 (4 096 m straight) | Lined both sides with Dense urban @100% chunks (rows Y07, Y09) | 6-lane flat road. At 55 m/s a run takes **74.5 s** | Straight-line throughput at v_max (04 §3.2: 29% I/O, 65% main) |
 | **H2 Diagonal highway** | (X02,Y02)→(X29,Y29), 45°, 4.9 km | Dense urban band 3 chunks wide either side | Straight diagonal road | **Worst sustained case** (92% main-thread slice) |
@@ -42,7 +42,7 @@ Primitive assets (authored once by hand or by a Blender script, all graybox):
 | **T1 Corner thrash** | Corner point of X12/X13 × Y20/Y21 (inside Z1) | Dense urban | 4-way intersection exactly on a chunk corner. Figure-8 route, radius 70 m, 20 m/s | Hysteresis at the 4-chunk junction |
 | **T2 Edge thrash** | Boundary line Y = 18/19, X16–X23 | Industrial | 1 km road on the chunk edge. Route weaves ±10 m across the line at 30 m/s | Edge hysteresis, min dwell |
 | **T3 Radius thrash** | Shuttle path in Z3 at 256 ± 40 m from a dense chunk placed at X10,Y08 | Mixed | Oscillates across the G R_in/R_out band every 4 s | R_in/R_out band, cancellation of in-flight loads |
-| **W1 Worst-case chunk** | X14,Y18 (in Z1) | Dense urban @**150%** | 900 G entities, 6 000 bulk, 36 lights, ~375 draws | Degradation ladder (expect L1, never L3). **Budget report must flag it** |
+| **W1 Worst-case chunk** | X14,Y18 (in Z1) | Dense urban @**150%** | 900 G entities, 300 S sections, 375 D handles, 36 lights, ~375 draws | Degradation ladder (expect L1, never L3). **Budget report must flag it** |
 | **I1 Interior stress** | X10,Y22 (in Z1) | Interior | 6 seamless interiors × 400 m² × 400 entities, walkable in sequence in 60 s. 1 vehicle-drive-through garage shell (Mack's workshop analogue). 1 airlock cell 2 000 m² / 1 500 entities | I-layer radius, portal culling, airlock ≤ 1.5 s, G-before-I dependency |
 | **P1 Precision corner** | X31,Y31 | Rural | 0.5° ramp with a sphere creeping at ~10 mm/s. Static box stack. Inspect camera at 0.5 m | ULP analysis (04 §3.1): no visible jitter; creep speed error < 10% |
 | **F1 Flood ramp** | Z2 | Industrial | Global flood level ramps 0 → 2 m over 60 s while driving through | AD-08: **0 chunk reloads**, depth queries via physics and heightmap |
@@ -51,7 +51,7 @@ Primitive assets (authored once by hand or by a Blender script, all graybox):
 
 ### Instrumentation
 
-**Streaming HUD** (ImGui overlay in profile builds [VERIFY ImGui gem availability in GameLauncher profile]). It reads `StreamingFrameStats` plus engine stats:
+**Streaming HUD:** an ImGui overlay. The ImGui gem is usable in launchers via `ImGui.Clients`/`.Unified` (✔ V-77). It is **not** compiled out in release by the engine, so our HUD is wrapped in `#if !defined(_RELEASE)`. It reads `StreamingFrameStats` plus engine stats:
 
 | Panel | Fields | Source |
 |---|---|---|
@@ -59,8 +59,8 @@ Primitive assets (authored once by hand or by a Blender script, all graybox):
 | I/O | Layers in flight, bytes in flight, queue length, measured MB/s (EMA), T_ready EMA per layer | Tracker |
 | Main thread | Scheduler / instantiate / deactivate ms (current, avg 1 s, max 10 s) | Tracker |
 | Safety | Min G slack (s), nearest unready G distance (m), degradation level, speed cap (m/s), vehicle speed | Tracker |
-| Memory | Arena blocks in use / peak, LoadedInactive cache bytes, live entities, live bulk instances, process RAM, VRAM by category | Tracker + O3DE memory stats [VERIFY API] + Atom/RHI memory stats [VERIFY] |
-| Render | Draw calls, visible triangles, LOD histogram (bulk path from ILodPolicy counters; entity meshes from Atom stats if exposed [VERIFY]), active occluders | Atom stats [VERIFY] + ours |
+| Memory | Arena blocks in use / peak, LoadedInactive cache bytes, live entities, **live mesh handles vs. 24 k cap**, simulated bodies, per-allocator used/reserved, process working set, VRAM by category | Tracker + `AllocatorManager::GetAllocatorStats` + `AZ::QueryMemInfo` (✔ V-41) + `RHIMemoryStatisticsInterface` (✔ V-62) |
+| Render | Draw items (`PassSystemInterface::GetFrameStatistics`, ✔ V-63), primitives (pipeline-statistics queries), active occluder planes, terrain forced-LOD distribution | Atom + ours |
 | Minimap | 32×32 grid coloured by G-layer state, focus position, velocity vector, pins | Ours |
 
 **Logging:** per-frame CSV, `tests/results/<runId>/raw/frames.csv` (ignored by git):
@@ -78,7 +78,7 @@ Plus a run summary `tests/results/<runId>/summary.json`, which is committed.
 | Fixed conditions | 1920×1080, vsync off, fixed lighting state (Day), fixed seeds, profile build, no editor |
 | Cache conditions | **Warm** (2nd consecutive run) and **cold** (after purging the OS standby list with Sysinternals RAMMap "Empty Standby List", or after a reboot) |
 | Hardware | Dev machine on every run. **Min-spec box at the P2 exit and P3 exit** (see risk R5, 06) |
-| Invocation | Launcher command-line/console variable to select a route and auto-quit [VERIFY launcher arg/CVar mechanism]. Exit code = pass/fail |
+| Invocation | `AZ_CVAR` `lt_benchRoute` / `lt_benchAutoQuit` set on the launcher command line (`--lt_benchRoute=R1`). The command line is executed as console commands after gems load (✔ V-47). Exit code = pass/fail |
 
 | Route | Description | Duration |
 |---|---|---|
@@ -111,7 +111,8 @@ Plus a run summary `tests/results/<runId>/summary.json`, which is committed.
 | P13 | Stability | 0 crashes, 0 asserts | S2 |
 
 **First measurement in P2 (gates everything above):**
-- Entity activation microbenchmark: spawn a G-layer prefab with N = 100, 500, 1 000, 2 000 entities and record µs/entity.
+- Entity spawn microbenchmark: `SpawnEntities` batches of 10 from a G-layer spawnable with N = 100, 500, 1 000, 2 000 entities. Record µs/entity as measured inside `SpawnableSystemComponent` processing at TICK_GAME.
+- Mesh-handle microbenchmark: acquire 1 k/10 k/24 k static handles (ray tracing off) and record µs/acquire plus `MeshFeatureProcessor::Simulate` ms per 10 k handles.
 - If > 40 µs, re-derive the chunk radii, entity caps and slice budget in 04 §3.2 **before** building the zones.
 
 ---
@@ -120,8 +121,11 @@ Plus a run summary `tests/results/<runId>/summary.json`, which is committed.
 
 The headers live in `tools/templates/LowTideStreaming/`. They are copied into `LowTide/Gems/LowTideStreaming/` after `create-gem` (03 §2.5).
 
-**Verified:** the engine-independent headers compile with `clang++ -std=c++17` and `-std=c++20` with `-Wall -Wextra -Wpedantic -Werror` (header-only syntax check, macOS).
-**Not yet verified:** MSVC/O3DE compile of the two AzCore-dependent headers. That's an Exit Gate item.
+**Verified (2026-11-21):**
+- The 9 engine-independent headers compile with `clang++ -std=c++17` and `-std=c++20`, `-Wall -Wextra -Wpedantic -Werror`.
+- **The 2 AzCore-dependent headers compile against the real O3DE 26.10.0 AzCore** (clang, C++20, syntax-only). Static asserts confirm `TICK_INPUT`=75, `TICK_GAME`=80, `TICK_PHYSICS_SYSTEM`=200 and both bus handler policies. `StreamingSystemComponent` is non-abstract, so every bus override matches. A deliberately wrong override fails as expected.
+
+**Still open (G10):** an MSVC profile build inside a generated gem on Windows.
 
 | Header | Location | Depends on | Contents |
 |---|---|---|---|
@@ -131,27 +135,27 @@ The headers live in `tools/templates/LowTideStreaming/`. They are copied into `L
 | [ChunkMemoryArena.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ChunkMemoryArena.h) | Include/ | std | `ChunkBlockPool`, `ChunkArena`, `AllocationTag`, `ArenaCategory` |
 | [ChunkBudgetTracker.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ChunkBudgetTracker.h) | Include/ | std | Per-layer resource counters, `LeakReport`, `StreamingFrameStats` |
 | [ChunkPriority.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ChunkPriority.h) | Include/ | std | Pure priority, look-ahead radius, degradation and speed-cap functions |
-| [ILodPolicy.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ILodPolicy.h) | Include/ | std | `ILodPolicy`, `AssetClass`, `HlodMode` |
-| [ICullingPolicy.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ICullingPolicy.h) | Include/ | std | `ICullingPolicy` (portals, occluder selection, shadow casters) |
+| [ILodPolicy.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ILodPolicy.h) | Include/ | std | `ILodPolicy`: per-class `LodSettings` mirroring Atom's per-mesh `LodConfiguration`, terrain ring LOD, `HlodMode` |
+| [ICullingPolicy.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ICullingPolicy.h) | Include/ | std | `ICullingPolicy`: portals + occluder-plane selection (runtime), shadow casters (**build time**) |
 | [IChunkDeltaStore.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/IChunkDeltaStore.h) | Include/ | std | AD-09 delta store contract |
 | [ChunkStreamingBus.h](../tools/templates/LowTideStreaming/Code/Include/LowTideStreaming/ChunkStreamingBus.h) | Include/ | AzCore | `ChunkStreamingRequests` / `RequestBus`, `ChunkStreamingNotifications` / `NotificationBus` |
 | [StreamingSystemComponent.h](../tools/templates/LowTideStreaming/Code/Source/Engine/StreamingSystemComponent.h) | Source/Engine/ (private) | AzCore | System component skeleton, pimpl |
 
 ASSUMPTION: The brief's `IChunkStreamingRequests` is named `ChunkStreamingRequests`, following the O3DE bus convention adopted in 03 §2.4.
 
-### Gem CMake skeleton (file list; contents generated by `create-gem`, then edited) [VERIFY template file names]
+### Gem CMake skeleton (file list; generated by `create-gem` from DefaultGem, then edited; names verified against 26.10 ✔)
 
 | File | Purpose |
 |---|---|
-| `Gems/LowTideStreaming/gem.json` | Gem manifest: name, version, dependencies (none besides AzCore/AzFramework, Atom_Feature_Common, PhysX5) [VERIFY gem dependency names] |
+| `Gems/LowTideStreaming/gem.json` | Gem manifest: name, version, dependencies on `Atom_Feature_Common`, `PhysX5`, `ImGui` [VERIFY exact gem.json dependency names on Windows build] |
 | `Gems/LowTideStreaming/CMakeLists.txt` | Gem root: adds `Code/` |
-| `Code/CMakeLists.txt` | Targets: `LowTideStreaming.Core.Static` (std-only Core, no engine deps); `LowTideStreaming.Static` (engine glue, links Core); `LowTideStreaming` (runtime module); `LowTideStreaming.Tests` (AzTest) [VERIFY `ly_add_target`/`ly_create_alias` usage] |
-| `Code/lowtidestreaming_core_files.cmake` | Core sources: Source/Core/*.cpp + Include std-only headers |
-| `Code/lowtidestreaming_files.cmake` | Engine glue sources: Source/Engine/* |
+| `Code/CMakeLists.txt` | DefaultGem-template targets (✔ V-08): `LowTideStreaming.API` (INTERFACE, public headers), `LowTideStreaming.Private.Object` (STATIC, engine glue), `LowTideStreaming` (module), `LowTideStreaming.Tests`, aliases `.Clients/.Unified/...`. **Added:** `LowTideStreaming.Core` (STATIC, std-only, no engine deps), linked by `.Private.Object` and by `tests/core_standalone` |
+| `Code/lowtidestreaming_core_files.cmake` | **Added**: Core sources (Source/Core/*.cpp) |
+| `Code/lowtidestreaming_private_files.cmake` | Engine glue sources: Source/Engine/* |
 | `Code/lowtidestreaming_api_files.cmake` | Public headers (Include/LowTideStreaming/*) |
-| `Code/lowtidestreaming_shared_files.cmake` | Module entry: `LowTideStreamingModule.cpp` |
+| `Code/lowtidestreaming_shared_files.cmake` | Module entry (template's module source) |
 | `Code/lowtidestreaming_tests_files.cmake` | Tests/*.cpp |
-| `Code/Source/LowTideStreamingModule.cpp` | `AZ::Module` subclass registering `StreamingSystemComponent` descriptor + system component list [VERIFY module macro] |
+| `Code/Source/Clients/…Module.cpp` (template-generated) | Module registering the `StreamingSystemComponent` descriptor + required system components (keep the template's macro/registration code as generated) |
 | `Code/Source/Engine/StreamingSystem.h/.cpp` | Implementation (P2) |
 | `Code/Tests/*Tests.cpp` | Unit + integration tests (§4.3) |
 | `tests/core_standalone/CMakeLists.txt` | **Engine-free** build of Core + Core tests. GoogleTest pinned via FetchContent (v1.15.2), so the same test sources compile under AzTest and standalone |
@@ -182,8 +186,8 @@ ASSUMPTION: The brief's `IChunkStreamingRequests` is named `ChunkStreamingReques
 | U14 | BudgetTracker | Balanced vs. unbalanced counters per kind | `VerifyReleased` reports exactly the leaked kinds |
 | U15 | DeltaStore | Overwrite by id. Cap eviction (cosmetic first, gameplay never). Content hash | Invariants D1–D4 |
 | U16 | Save TLV (P3) | Round-trip, unknown section skip, v1→v3 migration chain, CRC mismatch | Bit-exact round-trip. Migration matches the fixture |
-| U17 | LodPolicy | Thresholds + hysteresis per class. Shadow LOD ≥ render LOD. HLOD mode exclusivity | L1–L3 |
-| U18 | CullingPolicy | Portal truth table. Occluder top-N. Shadow-caster rules | C1–C3 |
+| U17 | LodPolicy | Per-class settings stable. Terrain ring LOD monotonic. HLOD mode exclusivity | L1–L3 |
+| U18 | CullingPolicy | Portal truth table. Occluder top-N. Build-time shadow-caster rules | C1–C3 |
 | U19 | Variant selection | Global-state snapshot → selected groups | Deterministic. Table-driven fixtures |
 | U20 | Zero-alloc tick | Scheduler tick over a 1 024-chunk table under an allocation-counting `operator new` hook | 0 allocations after warm-up |
 | U21 | Config | `Validate()` rejects each rule violation | Every rule covered |
@@ -192,10 +196,10 @@ ASSUMPTION: The brief's `IChunkStreamingRequests` is named `ChunkStreamingReques
 
 | ID | Test | Pass criteria |
 |---|---|---|
-| E1 | Entity activation microbenchmark (§4.1) | µs/entity recorded; ≤ 40 µs, otherwise re-derive radii (blocking) |
+| E1 | Spawn microbenchmark (§4.1) + **cross-batch reference test**: entity references between two `SpawnEntities` batches on one ticket resolve correctly | µs/entity ≤ 40, otherwise re-derive radii (blocking). If cross-batch refs break, switch to one spawnable per layer section |
 | E2 | Spawn/despawn one generated G chunk × 1 000 cycles | 0 LeakReports. RAM delta < 1 MB after cycle 100 |
-| E3 | Bulk path: 4 000 instances acquire/release × 100 | Handle counts balanced. VRAM returns to baseline ± 2 MB |
-| E4 | Bulk static physics actors | Raycasts hit only while the layer is Active. No hits after Unloaded |
+| E3 | Mesh handles: acquire/release 24 k static handles × 20 cycles, instancing on | Handle counts balanced. VRAM baseline ± 2 MB. `Simulate` ≤ 1.0 ms per 10 k handles [T]. LOD switch distances recorded per class (decay-rate tuning) |
+| E4 | Entity-less static bodies: shapes created on a worker, `AddSimulatedBodies` on main at tick 78 | Raycasts hit only while Active. No hits after Unloaded. No asserts when `CreateShape` runs off-main (else move it to main) |
 | E5 | Cancellation mid-I/O and mid-deserialize (forced) | Layer reaches Unloaded. 0 leaks. Arena pool baseline restored |
 | E6 | Failure injection: corrupt `.ltchunk`, I/O timeout | → Failed. Coarse proxy active. `IsCollisionReady` true. Log emitted |
 | E7 | Benchmark routes R1–R7 | §4.1 thresholds P1–P5, P7–P12 |

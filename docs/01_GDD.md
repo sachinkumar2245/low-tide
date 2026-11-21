@@ -5,7 +5,7 @@
 ## 0. Ground Rules for This Document
 
 - Source references: `Pro` = Prologue · `M1–M17` = main missions · `A1E/A2E` = Act I/II ending scenes · chain names from Bible §8 · `§n` = Bible section.
-- ASSUMPTION: Engine = latest stable O3DE release line at project start (25.x) [VERIFY exact tag; pinned in 03]. Engine references here are at capability level only. Exact classes, gems and APIs get confirmed in Parts 2–4.
+- Engine = **O3DE 26.10.0** (tag `2610.0`, locked in 03 §2.1). Engine references here are at capability level only. Their verified status is in the 06 §4.6 [VERIFY] index, triaged against the 26.10 source on 2026-11-21.
 - Phase key: **P2** graybox prototype · **P3** traffic/AI/mission state machine · **P4** vertical slice art/audio · **P5** full production · **Cut** = not supported by the architecture · **Defer** = hooks kept, not in v1.0.
 - ⚑ = architectural flag (expensive to change later). Each flag has a decision in §1.1b.
 - Driving is the protagonist's identity (ex-getaway driver and mechanic, §2). Vehicle feel and streaming at speed are first-class requirements, not support systems.

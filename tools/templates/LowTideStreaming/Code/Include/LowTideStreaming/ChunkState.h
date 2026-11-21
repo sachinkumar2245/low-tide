@@ -22,12 +22,16 @@ namespace LowTide::Streaming
     {
         Unloaded = 0,     //!< descriptor only; no memory held
         Queued,           //!< wanted; waiting in priority queue (main)
-        IOPending,        //!< asset/I/O requests in flight (asset/streamer threads)
-        Deserializing,    //!< job worker parsing into chunk arena
-        LoadedInactive,   //!< data resident (warm cache), nothing in the world
-        Instantiating,    //!< main thread, time-sliced: spawn, acquire handles, apply deltas
+        IOPending,        //!< Asset<T> loads in flight; parse runs in AssetManager LoadAssetJob;
+                          //!< ready notified on main via AssetManager::DispatchEvents
+        Deserializing,    //!< post-load TaskGraph job: variants, spawn batch lists, shape creation
+        LoadedInactive,   //!< data resident (warm cache), nothing in the world (engine has no
+                          //!< "spawn inactive"; this state is pre-spawn by design)
+        Instantiating,    //!< main thread, sliced: SpawnEntities(indices) batches (<= 1 in flight
+                          //!< per ticket), AcquireMesh batches, AddSimulatedBodies batches
         Active,           //!< in world, simulated, visible
-        Deactivating,     //!< main thread, time-sliced: flush deltas, despawn, release handles
+        Deactivating,     //!< main thread, sliced: flush deltas, DespawnEntity / ReleaseMesh /
+                          //!< RemoveSimulatedBodies batches
         Unloading,        //!< release asset refs, return arena blocks
         Failed,           //!< retries exhausted; fallback (coarse proxy) engaged for Gameplay
         Count
@@ -55,6 +59,8 @@ namespace LowTide::Streaming
      *   I3  Generation increments exactly once per Unloaded -> Queued -> IOPending cycle (on IOPending entry).
      *   I4  Interior and Detail layers may enter Instantiating only if the same chunk's Gameplay layer is Active.
      *   I5  Every transition is observable via ChunkStreamingNotificationBus::OnLayerStateChanged (main thread).
+     *   I6  At most one spawn batch is queued per EntitySpawnTicket at any time: queued spawns cannot be
+     *       cancelled in O3DE 26.10 (docs/06 V-37), so this bounds cancellation latency to one frame.
      */
 
     //! True iff (from -> to) appears in the table above. Pure, constant-time.

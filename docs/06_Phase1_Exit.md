@@ -1,186 +1,197 @@
 # FILE: /docs/06_Phase1_Exit.md
 
-**Project:** LOW TIDE | **Phase:** 1 exit | **Doc status:** v0.1
+**Project:** LOW TIDE | **Phase:** 1 exit | **Doc status:** v0.2: [VERIFY] index triaged against the O3DE **26.10.0** source (tag `2610.0`, commit `b6122815`, 2026-11-21)
 
 ---
 
 ## 4.4 Risk Register (top 10, streaming foundation)
 
-L = likelihood, I = impact (H/M/L).
+L = likelihood, I = impact (H/M/L). Updated after the source triage.
 
 | # | Risk | L | I | Early-warning signal | Mitigation | Retired in |
 |---|---|---|---|---|---|---|
-| R1 | **O3DE API churn / undocumented behaviour** (spawnables, prefab API, allocators, EBus details): the 26.05 surface differs from the [VERIFY] assumptions | H | H | Any P2-blocking [VERIFY] item refuted. Engine-glue compile breaks | Pin 26.05.x with no mid-phase upgrades. Engine code stays in `Source/Engine`; logic in std-only Core. Week-4 spikes on blocking items first. Engine patches tracked as `.patch` | P2 (blocking items); re-opened at each engine upgrade |
-| R2 | **Entity activation cost ≫ 25 µs** invalidates radii, entity caps and slice budget | M | H | E1 > 40 µs/entity | Bulk path for static content. Lower per-chunk entity caps. Larger R_in (04 §3.2 formula). Smaller work items | P2 week 4–5 |
-| R3 | **Bulk entity-less render/physics path not usable from a gem** (no public API, or not thread/lifetime-safe) | M | H | Spike: can't acquire mesh handles or add static actors outside entities | Fallback: prefab path only, entity caps −40%, radii re-derived. Same `ILodPolicy`/HUD contracts | P2 week 4–5 |
-| R4 | **Main-thread-only engine operations exceed the 1.5 ms slice** (spawn, physics add, render handle create are not divisible) | M | H | P3 metric: streaming ms p99 > 2 ms; spikes at specific work items | Pre-split work items (≤ 10 entities). Spread per-chunk activation across frames. Investigate engine spawn priority/async options [VERIFY]. Raise the slice into frame slack (L1) | P2 exit (R1, R2 routes) |
-| R5 | **No min-spec hardware for validation**, so budgets are only validated on the dev machine | H | M | No min-spec run logged by the P2 exit | Buy/borrow a used Ryzen 5 3600 + GTX 1660 Super + SATA SSD box (or downgrade parts in a spare case). Dev-machine thresholds are set stricter (P1: 12 ms) | P3 exit |
-| R6 | **Asset pipeline throughput (solo)**: LODs, HLODs, collision and probes per chunk exceed the authoring rate in 02 §2.1 | H | H | Old Mercy authoring in P4 measures < 0.1 km²/week. HLOD/probe bake > 10 min per chunk | Automate: Blender export + `.ltmeta`, HLOD generator, validators, budget report. Kit reuse ≥ 70%. Contingency: cut Briar to 1.5 km² (02) | P4 exit |
-| R7 | **Scope creep** (the bible is rich; features return quietly) | H | H | A feature or system started that isn't Keep in 02 §2.3. Week estimates slip > 15% | Change control: any addition needs an equal-cost cut logged in 02 with the point total. Phase gates re-check the 62.7% cut | Never retired; checked at every gate |
-| R8 | **Long-session memory growth / fragmentation** in engine-owned allocations | M | H | S1/S2 slope > 1 MB/min. LeakReports. SystemAllocator growth | Uniform block pool. Bulk path. Per-layer counters. Allocation records in soak runs [VERIFY]. Bounded LoadedInactive cache | P3 (2 h soak on full slice) |
-| R9 | **Editor / Asset Processor scaling** with ~300 chunks × 5 layers + cells (AP rebuild time, editor load of context levels, prefab size) | M | M | Full AP rebuild > 2 h. `L_Author_OM` load > 60 s. Prefab edit lag | District context levels. Entity caps per prefab (1 000). Testbed full-grid AP run in P2 as an early probe. AP job tuning [VERIFY] | P3 (testbed) / P4 (real content) |
-| R10 | **Effective I/O throughput < 150 MB/s** on SATA (small files, pak decompression, AV scanners) | M | M | HUD measured MB/s < 100 under R1 | Aggregate the per-layer files into one blob per chunk-layer. Order the pak by chunk coordinate. Choose a cheaper compression. Increase R_in (budget allows up to ×3.7 slower) | P2 (loose files) / P5 (paks) |
+| R1 | **O3DE API churn / behaviour differs from docs**, incl. regressions in the brand-new 26.10.0 | M (was H: 77 claims now confirmed or corrected from source) | H | A Week-4 spike contradicts §4.6. Engine-glue compile breaks | Pin `2610.0`; take `2610.1` only at a gate. Engine code isolated in `Source/Engine`, Core std-only. The engine-facing headers already compile against AzCore 26.10 | P2 |
+| R2 | **Spawn cost ≫ 25 µs/entity or mesh-handle cost ≫ 20 µs/handle** invalidates radii and caps | M | H | E1 > 40 µs/entity; E3 acquire > 40 µs or `Simulate` > 1 ms per 10 k handles | Merged sections (fewer handles); smaller G prefabs; larger R_in (04 §3.2 formula); fewer D props | P2 week 4–5 |
+| R3 | **Entity-less paths hit undocumented limits**: no locks in MeshFeatureProcessor; `CreateShape` thread-safety unknown; cross-batch spawn references | M (API existence now confirmed ✔ V-51, V-68) | H | Concurrency-checker asserts; physics asserts off-main; broken references in E1 | Main-thread-only calls at tick 78. Move `CreateShape` to main if needed. One spawnable per layer section if cross-batch refs fail. Final fallback: prefab path with −40% entities | P2 week 4–5 |
+| R4 | **Main-thread saturation.** Atom has no render thread, PhysX `FinishSimulation` blocks main, and spawn processing is main-only and not self-slicing (✔ V-37, V-44, V-49). Slack is only 1.8 ms | **H** | H | Empty-level baseline (task 8) shows RPI + physics > 6.5 ms. Streaming p99 > 2 ms | Spawn batches ≤ 10. Merged sections. Measure the RPI/physics split in task 8 and re-budget game/AI. Reduce draws/handles. PhysX substep tuning | P2 exit |
+| R5 | **No min-spec hardware for validation** | H | M | No min-spec run by the P2 exit | Used Ryzen 5 3600 + GTX 1660 Super + SATA SSD box. Stricter dev-machine thresholds | P3 exit |
+| R6 | **Asset pipeline throughput (solo):** merged sections, LODs, HLODs, occluder planes, probes | H | H | OM authoring < 0.1 km²/week in P4. Section merge/bake > 10 min per chunk | Builder automates section merge + LOD regeneration. Blender export + `.ltmeta`. Validators. Contingency: cut Briar to 1.5 km² | P4 exit |
+| R7 | **Scope creep** | H | H | Non-Keep feature started. Estimates slip > 15% | Equal-cost cut logged in 02 for any addition | Never; every gate |
+| R8 | **Long-session memory growth / fragmentation.** The engine exposes **no fragmentation stats** (◐ V-40); RHI pools don't defragment (◐ V-64) | M | H | S1/S2 slope > 1 MB/min. `reserved − used` trend rising | Uniform block pool. Bounded handles. Named child allocator + allocation records in soak runs | P3 |
+| R9 | **Editor / AP scaling** with ~300 chunks × layers | M | M | AP full rebuild > 2 h; context level load > 60 s | District context levels; prefab caps; testbed full-grid AP run in P2 | P3/P4 |
+| R10 | **I/O < 150 MB/s effective**; **AssetManager has no load cancel** (◐ V-36) | M | M | HUD < 100 MB/s; wasted loads after cancel > 20% | Pak ordering by chunk. Aggregate blobs. Larger R_in. Drop refs on cancel. Evaluate direct `IStreamer` reads with `RescheduleRequest`/`Cancel` for `.ltchunk` (✔ V-35) | P2 (loose) / P5 (paks) |
 
 ---
 
 ## 4.5 Phase 1 Exit Gate (binary)
 
-| # | Item | Status at doc time |
+| # | Item | Status |
 |---|---|---|
-| G1 | GDD verb list complete (64 verbs) and reconciled against the story bible (01 v0.2) | ☑ written |
-| G2 | Systems requirement matrix + set-piece risks + content-sensitivity hooks complete (01) | ☑ written |
-| G3 | Scope cut documented: map −60.0%, features −62.7% (02) | ☑ written |
-| G4 | **MVS signed off by owner** (Old Mercy, 3 vehicles, Prologue + M2, criteria D1–D11) | ☐ owner |
-| G5 | Owner decisions recorded: adult-content policy for v1.0; Briar contingency trigger | ☐ owner |
-| G6 | Engine 26.05.x built from source at the pinned tag; Editor + Asset Processor launch | ☐ |
-| G7 | Repo initialised. `.gitattributes`/`.gitignore` committed. `core.hooksPath` set | ☑ 2026-11-21: public repo `sachinkumar2245/low-tide`, `main` pushed |
-| G8 | **LFS verified by cloning to a clean directory** (03 §2.3 procedure; SHA-256 match, `git lfs fsck` OK) | ☑ 2026-11-21 (macOS): probe PNG SHA-256 match, `git lfs fsck` OK. Re-run on the Windows dev machine after `git lfs install` there |
-| G9 | O3DE project `LowTide` + gem `LowTideStreaming` created; headers copied from `tools/templates` | ☐ |
-| G10 | **Interface headers compile in an empty gem** (MSVC, profile build, one TU including all 11 headers) | ☐ (std-only headers pass clang C++17/20 `-Werror` syntax check) |
-| G11 | Naming validator spec written (03 §2.4); LOD validator + budget report specs written (04 §3.7, §3.8) | ☑ written |
-| G12 | Streaming design reviewed: owner cold-read ≥ 48 h after writing, every derivation re-checked, questions logged as ADRs | ☐ owner |
-| G13 | Testbed spec + test plan complete (05) | ☑ written |
-| G14 | Risk register complete (§4.4) | ☑ written |
-| G15 | **[VERIFY] index triaged**: every row has a status (Confirmed / Refuted → design change / Deferred to a named P2 spike). All **B** (P2-blocking) rows have a week-4/5 task | ☐ owner |
-| G16 | `v0.1.0` annotated tag pushed; NAS mirror updated | ☐ |
+| G1 | GDD verb list complete and reconciled with the story bible (01 v0.2) | ☑ |
+| G2 | Systems matrix, set-piece risks, content hooks (01) | ☑ |
+| G3 | Scope cut: map −60.0%, features −62.7% (02) | ☑ |
+| G4 | **MVS signed off by owner** | ☐ owner |
+| G5 | Owner decisions: adult-content policy for v1.0; Briar contingency trigger | ☐ owner (engine version decided: 26.10.0, 2026-11-21) |
+| G6 | Engine `2610.0` built from source; Editor + Asset Processor launch | ☐ Windows |
+| G7 | Repo initialised; attributes/ignore committed; hooksPath set | ☑ 2026-11-21: public repo `sachinkumar2245/low-tide` |
+| G8 | LFS verified by clean clone | ☑ 2026-11-21 (macOS). Re-run on Windows after `git lfs install` |
+| G9 | O3DE project + `LowTideStreaming` gem created; templates copied | ☐ Windows |
+| G10 | **Interface headers compile in an empty gem** (MSVC, profile) | ◐ All 11 headers syntax-check under clang. **The 2 AzCore headers compile against the real 26.10 AzCore** with static asserts on tick orders and bus policies (05 §4.2). MSVC gem build pending |
+| G11 | Validator + budget-report specs | ☑ (updated for verified naming: `_Phys`, last-segment texture suffix, no `_ORM`) |
+| G12 | Owner cold-read ≥ 48 h after writing | ☐ owner (04 v0.2 changed substantially, so read that) |
+| G13 | Testbed spec + test plan (05) | ☑ (v0.2: spawn batching, mesh-handle tests) |
+| G14 | Risk register | ☑ (updated) |
+| G15 | **[VERIFY] index triaged** | ◐ Source triage done (§4.6): **46 confirmed, 31 corrected (docs updated), 15 open** (each with a P2 task or phase). Owner skim of the corrected rows pending |
+| G16 | `v0.1.0` tag pushed; NAS mirror | ☐ |
 
 ### Phase 2 entry requirements
-1. G1–G16 all ☑.
-2. All **B** [VERIFY] items are either confirmed or have a scheduled spike in tasks 1–10 below.
-3. The standalone core test project (`tests/core_standalone`) builds and runs (even with zero tests).
-4. The engine baseline is measured: empty-level launcher RAM/VRAM/frame time, written into 04 §3.5 in place of the 1 500 MB assumption.
-5. No unresolved conflict between 01–05 (cross-reference check done during G12).
+1. G1–G16 ☑.
+2. All open **B** rows in §4.6 have run their Week-4/5 task.
+3. `tests/core_standalone` builds and runs.
+4. Engine baseline measured (task 8). 04 §3.0 main-thread split and §3.5 RAM baseline updated from measurements.
+5. No conflict between 01–06 (G12).
 
 ### First 10 tasks, Week 4 (in order)
 
-| # | Task | Output | Retires |
+| # | Task | Output | Closes |
 |---|---|---|---|
-| 1 | Run 03 §2.3 + §2.5: git init, LFS verify, create project + gem, copy headers, compile one TU with all headers in the `profile` build | G7–G10 ☑ | R1 (partial) |
-| 2 | **Spike: spawnable spawn/despawn** via ticket in the profile launcher; confirm threading, activation-on-spawn, entity id regeneration | ADR-001 | V-27, V-28, V-37 |
-| 3 | **E1 entity activation microbenchmark** (N = 100…2 000) | µs/entity figure; 04 §3.2 updated | R2 |
-| 4 | **Spike: bulk path**: acquire/release Atom mesh handles + static PhysX actors from gem code, 4 000 instances | ADR-002 (go / fallback) | R3 |
-| 5 | Texture suffix → image-preset mapping (`.setreg`); import test for `_BC/_N/_ORM` | Correct presets on import | V-22 |
-| 6 | Core implementation + tests: ChunkTypes, ChunkState, ChunkMemoryArena/BlockPool, BudgetTracker (U1–U4, U11–U14), standalone + AzTest | Green tests | — |
-| 7 | `validate_names.py` + pre-commit hook | Hook active | — |
-| 8 | Engine baseline measurement (empty level): RAM, VRAM, frame time, launcher startup | 04 §3.5 RAM table updated | Entry req. 4 |
-| 9 | `generate_testbed.py` v0 (neutral JSON + `.ltchunk` source) + `editor_build_prefabs.py` spike for one 2×2 Z1 block | 4 generated chunks in the editor | V-95 |
-| 10 | Streaming HUD v0 (states, ms, memory counters) + kinematic route playback + CSV logger skeleton | First R1 dry run on 4 chunks | — |
+| 1 | Windows setup: CMake 4.2.3, clone `2610.0`, `get_python.bat`, build engine, `register --this-engine`, `create-project`, `create-gem`, `enable-gem`, copy templates, **profile build with all headers** | G6, G9, G10 ☑ | V-03, V-92 |
+| 2 | **Spawn spike (E1):** `SpawnEntities` batches of 10 queued at tick 78; cost at TICK_GAME; high vs. default lane; **cross-batch reference test** | ADR-001, µs/entity | V-89, R2, R3 |
+| 3 | **Mesh-handle spike (E3):** 1 k/10 k/24 k static handles, `r_meshInstancingEnabled=true`, ray tracing off; `Simulate` ms; LOD switch distances per decay rate | ADR-002 | V-91, R2, R3 |
+| 4 | **Entity-less physics spike (E4):** `CreateShape` on a worker, `AddSimulatedBodies` at tick 78, raycast checks | ADR-003 | V-88, R3 |
+| 5 | Texture import check: one test texture per suffix (`_BC _N _Rough _Metal _AO _E _H _O _Mask`) → confirm presets/formats | Import report | V-22 (runtime) |
+| 6 | Core implementation + tests: ChunkTypes, ChunkState, arena/pool, BudgetTracker (U1–U4, U11–U14), standalone + AzTest | Green tests | — |
+| 7 | `validate_names.py` (incl. `PresetsByFileMask` cross-check, `_Phys`) + pre-commit hook | Hook active | — |
+| 8 | **Engine baseline:** empty level, profile launcher. RAM (`QueryMemInfo`, `GetAllocatorStats`), VRAM (RHI stats), main-thread split RPI / physics / tick | 04 §3.0 + §3.5 updated | V-49 (budget), R4 |
+| 9 | `generate_testbed.py` v0 + `editor_build_prefabs.py` (`SaveTemplateToString` + file write) for a 2×2 Z1 block + `.ltchunk` builder/handler stub | 4 chunks in the editor | V-29, V-30, V-31, V-34 |
+| 10 | HUD v0 (`#if !defined(_RELEASE)`) + `lt_benchRoute` CVar route playback + CSV logger | First R1 dry run | V-47 |
+
+**Week 5 spike:**
+- `.ltchunk` builder + handler complete
+- `AssetLoadParameters` deadline/priority (V-87)
+- occluder-plane creation from gem code (V-90)
+- `LowTideStreamingAllocator` child allocator + allocation-record config (V-40)
 
 ---
 
-## 4.6 [VERIFY] Index
+## 4.6 [VERIFY] Index (triaged)
 
-Columns:
-- **ID**
-- **Claim** (what I assumed)
-- **Sec** = where it is used
-- **Confirm in**: likely O3DE source/doc location; paths are approximate and relative to the engine repo root
-- **B** = blocks P2 week 4–5
+**Status:**
+- ✔ = confirmed as written
+- ◐ = partly right; the corrected fact is in the docs
+- ✖ = wrong; the docs are changed
+- ○ = open (source can't settle it; resolved by the named task or phase)
 
-| ID | Claim | Sec | Confirm in | B |
-|---|---|---|---|---|
-| **Engine / build** | | | | |
-| V-01 | 26.05.x latest patch tag | 03 §2.1 | GitHub o3de/o3de releases; docs.o3de.org release notes | B |
-| V-02 | `o3de.bat register --this-engine`, `create-project --project-path … --template-name DefaultProject`, `create-gem`, `enable-gem` syntax | 03 §2.5 | `scripts/o3de.bat`, `scripts/o3de/o3de/*.py`; docs "Project/Gem CLI" | B |
-| V-03 | VS2022 17.14 supported (VS2026 status) | 03 §2.1 | docs.o3de.org/docs/welcome-guide/requirements | B |
-| V-04 | Bundled CMake ≥ 3.25 (presets v6) | 03 §2.1, §2.5 | 26.05 release notes; `cmake/` | B |
-| V-05 | Engine C++ standard (17 vs 20) | 03 §2.1 | `cmake/Platform/Common/Configurations_common.cmake` / `CMAKE_CXX_STANDARD` | — |
-| V-06 | Bundled Python path/version | 03 §2.1 | `python/python.cmd`, `python/get_python.*` | — |
-| V-07 | Project template places the game gem in `Gem/` | 03 §2.2 | `Templates/DefaultProject/` | — |
-| V-08 | Gem template file names (`*_files.cmake`, `*_api_files.cmake`, `*_shared_files.cmake`) and target names (`.Static`, `.Tests`, `.Editor`) | 03 §2.4, 05 §4.2 | `Templates/DefaultGem/` (or the CppTool gem template); `cmake/LYWrappers.cmake` (`ly_add_target`) | B |
-| V-09 | `LY_UNITY_BUILD`, `LY_MONOLITHIC_GAME` cache vars | 03 §2.5 | `cmake/` (search the var names); docs "Build monolithic" | — |
-| V-10 | Target names `Editor`, `<Project>.GameLauncher`, `AssetProcessorBatch` | 03 §2.5 | `Code/Editor`, `Code/LauncherUnified`, `Code/Tools/AssetProcessor` CMakeLists | B |
-| V-11 | ctest naming/labels (`SUITE_main` etc.) | 03 §2.5 | `cmake/LyAutoGen`/`LYTestWrappers.cmake` (`ly_add_googletest`) | — |
-| V-12 | debug/profile/release define sets | 03 §2.5 | `cmake/Platform/Common/Configurations_common.cmake` | — |
-| V-13 | `AssetProcessorBatch.exe` flags | 03 §2.5 | `Code/Tools/AssetProcessor`; docs "Asset Processor batch" | — |
-| V-14 | Editor save-backup folder name (`_savebackup`) | 03 .gitignore | Run the editor once; inspect the project tree | — |
-| V-15 | `PhysX5` gem name and default in 26.05 | 03 §2.1 | 26.05 release notes; `Gems/PhysX/` | — |
-| V-16 | ASan works with O3DE allocators | 03 §2.1, 04 §3.5 | Try the `asan` preset; search `AZ_ENABLE_ADDRESS_SANITIZER`-like options in `cmake/` | — |
-| V-17 | GitHub LFS pricing/quota | 03 §2.1 | GitHub billing docs | — |
-| V-18 | Newer Blender LTS than 4.5 | 03 §2.1 | blender.org/download/lts | — |
-| **Assets / pipeline** | | | | |
-| V-19 | Asset Processor default scan folders exclude `assets_source/` outside the project | 03 §2.2 | `Registry/AssetProcessorPlatformConfig.setreg` | — |
-| V-20 | Scene-builder LOD node suffix (`_lod1`…) and physics mesh naming, case sensitivity | 03 §2.4, 04 §3.7 | `Gems/SceneProcessing`, `Code/Tools/SceneAPI` (LOD rule); docs "FBX settings / LODs" | — |
-| V-21 | `.assetinfo` scene-manifest schema | 04 §3.7 | Open a generated `.assetinfo`; `Code/Tools/SceneAPI/SceneCore/Containers/SceneManifest` | — |
-| V-22 | Image builder suffix → preset mapping config location/keys | 03 §2.4 | `Gems/Atom/Asset/ImageProcessingAtom/` (preset `.preset` files, builder settings `.setreg`) | B |
-| V-23 | Atom material parent inheritance (`parentMaterial`) | 03 §2.4 | `Gems/Atom/RPI/Code/Source/RPI.Edit/Material/MaterialSourceData*` | — |
-| V-24 | `.physxmaterial` extension | 03 §2.4 | `Gems/PhysX/Core/Code/Source/` material asset | — |
-| V-25 | 26.05 particle asset type (new native particle system) | 03 §2.4 | 26.05 release notes; new particle gem | — |
-| V-26 | Sequence/cutscene asset type (Track View successor?) | 01 V57, 03 §2.4 | `Gems/Maestro/`; docs "Track View" | — |
-| V-27 | Prefab builder `.prefab` → `.spawnable`; prefab JSON schema stability | 04 §3.4, 05 §4.1 | `Code/Framework/AzToolsFramework/AzToolsFramework/Prefab/`, `Gems/Prefab/PrefabBuilder` | B |
-| V-28 | Stable prefab entity ids across edits; spawn regenerates EntityIds | 03 §2.4, 04 §3.5 | `AzToolsFramework/Prefab/Instance/`; `AzFramework/Spawnable/` | B |
-| V-29 | Editor prefab focus-mode / nested editing workflow; editor scaling with large prefabs | 04 §3.2 | docs "Prefabs → Focus Mode"; empirical (R9) | — |
-| V-30 | AssetBuilderSDK custom builder registration (`.ltchunk`) | 04 §3.4 | `Code/Tools/AssetProcessor/AssetBuilderSDK/AssetBuilderSDK.h`; sample builders in `Gems/` | B |
-| V-31 | Custom `AZ::Data::AssetHandler` for runtime asset type | 04 §3.4 | `Code/Framework/AzCore/AzCore/Asset/AssetManager.h`, `AssetTypeInfoBus.h` | B |
-| V-32 | PhysX cooked mesh product type | 04 §3.4 | `Gems/PhysX/Core/Code/Source/Pipeline/` | — |
-| V-33 | AssetBundler seed lists / per-district paks; archive transparent to AssetManager | 04 §3.4 | `Code/Tools/AssetBundler/`; `Code/Framework/AzFramework/AzFramework/Archive/` | — |
-| V-34 | Editor Python bindings (`azlmbr`) can create entities and save prefabs in batch | 05 §4.1 | `Gems/EditorPythonBindings/`; docs "Editor Python scripting" | B |
-| **Runtime: core / streaming** | | | | |
-| V-35 | AZ::IO Streamer: read deadlines, priorities, cancel | 04 §3.3, §3.4 | `Code/Framework/AzCore/AzCore/IO/Streamer/` (`IStreamer.h`, `IStreamerTypes.h`) | B |
-| V-36 | AssetManager async load threads | 04 §3.3 | `AzCore/Asset/AssetManager.cpp` | — |
-| V-37 | `SpawnableEntitiesInterface`, `EntitySpawnTicket`, spawn/despawn names, main-thread processing, activation on spawn | 04 §3.3, §3.4 | `Code/Framework/AzFramework/AzFramework/Spawnable/SpawnableEntitiesInterface.h`, `SpawnableEntitiesManager.cpp` | B |
-| V-38 | `AZ::Job` vs `AZ::TaskGraph` as the preferred job API | 04 §3.4 | `AzCore/Jobs/`, `AzCore/Task/` | — |
-| V-39 | Allocator set after the rework: `SystemAllocator`, `PoolAllocator`, `ThreadPoolAllocator`, `AZ_CLASS_ALLOCATOR` | 04 §3.5 | `Code/Framework/AzCore/AzCore/Memory/` | B |
-| V-40 | Allocation records / memory tracking enable key; fragmentation stats | 03 §2.1, 04 §3.5 | `AzCore/Memory/AllocationRecords.h`, settings registry keys under `/O3DE/Memory` (search) | — |
-| V-41 | O3DE process memory stats API for HUD | 05 §4.1 | `AzCore/Memory/`, `AzCore/Debug/`; Profiler/ImGui memory panels | — |
-| V-42 | EBus traits (`HandlerPolicy`, `AddressPolicy` static constexpr), `AZ::EBus<>` alias; `AZ::Interface<>` preference | 05 §4.2 bus header | `AzCore/EBus/EBus.h`, `Policies.h`; `AzCore/Interface/Interface.h` | B |
-| V-43 | `AZ_COMPONENT` vs `AZ_COMPONENT_DECL/IMPL`; service function signatures; `AZ_CRC_CE` | 05 §4.2 component header | `AzCore/Component/Component.h`; DefaultGem template SystemComponent | B |
-| V-44 | `TickBus::Handler::OnTick(float, AZ::ScriptTimePoint)`, `GetTickOrder`, physics tick placement | 05 §4.2 | `AzCore/Component/TickBus.h`; `Gems/PhysX/Core/Code/Source/System/` | B |
-| V-45 | AzCore include paths used in headers | 05 §4.2 | Compile test (G10) | B |
-| V-46 | `AZ_TYPE_INFO_SPECIALIZE` for reflecting an external (std-only) struct | ChunkStreamingConfig.h | `AzCore/RTTI/TypeInfo.h` | — |
-| V-47 | Launcher command-line/CVar for auto-running a benchmark route | 05 §4.1 | `AzCore/Console/IConsole.h`; `Code/LauncherUnified` | — |
-| **Rendering (Atom)** | | | | |
-| V-48 | Minimum DX12 feature level | 04 §3.0 | docs requirements; `Gems/Atom/RHI/DX12/` device init | — |
-| V-49 | Atom render threading model (RPI on main, job-recorded command lists) | 04 §3.0 | `Gems/Atom/RPI/`, `Gems/Atom/RHI/Code/Source/RHI/FrameScheduler.cpp` | — |
-| V-50 | No camera-relative rendering; float world positions in object constants | 04 §3.1 | `Gems/Atom/Feature/Common/Code/Source/Mesh/`, view SRG | — |
-| V-51 | MeshFeatureProcessor public API usable from a gem for entity-less meshes; thread-safety | 04 §3.3, §3.4 | `Gems/Atom/Feature/Common/Code/Include/Atom/Feature/Mesh/MeshFeatureProcessorInterface.h` | **B** |
-| V-52 | GPU instancing of identical mesh+material draws | 04 §3.8 | Same folder (`MeshInstanceManager` or similar); 23.x+ release notes | — |
-| V-53 | Visibility system (octree / IVisibilityScene) for frustum culling | 04 §3.6 | `AzFramework/Visibility/` | — |
-| V-54 | Occlusion Culling Plane component + Masked Occlusion Culling | 04 §3.6 | `Gems/Atom/Feature/Common/Code/Source/OcclusionCullingPlane/`; RPI `Culling.cpp` | — |
-| V-55 | Mesh LOD config: min screen coverage / culling | 04 §3.6, §3.7 | `Gems/Atom/RPI/Code/Include/Atom/RPI.Public/Culling.h`; mesh component LOD settings | — |
-| V-56 | Per-cascade shadow culling; separate shadow LOD | 04 §3.6, §3.7 | `Gems/Atom/Feature/Common/Code/Source/Shadows/`, `CoreLights/DirectionalLightFeatureProcessor` | — |
-| V-57 | Light culling model and limits (clustered/forward+) | 01 §1.3, 04 §3.8 | `Gems/Atom/Feature/Common/Code/Source/CoreLights/`; docs Atom lights | — |
-| V-58 | Dithered LOD cross-fade support | 04 §3.4, §3.7 | Atom mesh LOD code; StandardPBR shader options | — |
-| V-59 | Streaming image pool budget + mip bias/priority controls; force-resident mips (inspect mode) | 01 V29, 04 §3.5, §3.7 | `Gems/Atom/RPI/Code/Source/RPI.Public/Image/StreamingImagePool*`, `ImageSystem` | — |
-| V-60 | Reflection probe bake format/compression | 04 §3.5 | `Gems/Atom/Feature/Common/Code/Source/ReflectionProbe/` | — |
-| V-61 | Diffuse GI probe grid cost | 04 §3.8 | `Gems/DiffuseProbeGrid/` | — |
-| V-62 | Pass attachment memory view / RHI memory stats | 04 §3.5, 05 §4.1 | Atom ImGui tools (`Gems/Atom/Utils/`), RHI memory statistics | — |
-| V-63 | Draw-call / triangle stats exposed | 05 §4.1 | Atom ImGui "Pass tree" / RPI stats | — |
-| V-64 | Buffer pool sub-allocation (fragmentation) | 04 §3.5 | `Gems/Atom/RHI/Code/Source/RHI/BufferPool*` | — |
-| V-65 | Video playback support (security footage alternative) | 01 AD-14 | Gem catalog (video/media gems) | — |
-| V-66 | Render-to-texture for phone camera (deferred) | 01 V34 | Atom RPI render pipeline / attachment image docs | — |
-| V-67 | Third-party / gem ocean water | 01 AD-02 | Gem catalog; community gems | — |
-| **Physics** | | | | |
-| V-68 | AzPhysics scene API: add/remove static actors without entities; write threading | 04 §3.3, §3.4 | `Code/Framework/AzFramework/AzFramework/Physics/PhysicsScene.h`; `Gems/PhysX/Core/Code/Source/Scene/` | **B** |
-| V-69 | PhysX 5 default sleep threshold in O3DE | 04 §3.1 | `Gems/PhysX/Core/Code/Source/RigidBody.cpp` / rigid body configuration | — |
-| V-70 | PhysX origin shift not exposed | 04 §3.1 | Search `shiftOrigin` in `Gems/PhysX` | — |
-| V-71 | No double-precision world build | 04 §3.1 | `AzCore/Math/Vector3.h` (float `Simd` types); docs/RFCs on large worlds | — |
-| V-72 | CCD configuration for fast vehicles | 01 §1.3 | `Gems/PhysX/Core` rigid body config (CCD flags) | — |
-| V-73 | PhysX character controller component | 01 V01 | `Gems/PhysX/Core/Code/Source/` CharacterController | — |
-| V-74 | Scene raycast API (weapons, flood depth) | 01 V23, 04 §3.9 | `AzFramework/Physics/PhysicsScene.h` (`QueryScene`) | — |
-| V-75 | No stock vehicle gem (or maturity of any existing one) | 01 V11 | Gem catalog | B (P2 gameplay) |
-| **Other gems** | | | | |
-| V-76 | Profiler gem + `AZ_PROFILE_SCOPE` macro names | 03 §2.1 | `Gems/Profiler/`; `AzCore/Debug/Profiler.h` | — |
-| V-77 | ImGui gem available in GameLauncher profile builds | 05 §4.1 | `Gems/ImGui/` | B |
-| V-78 | Terrain gem runtime streaming of spawner areas (rejected path) | 04 §3.2 | `Gems/Terrain/` | — |
-| V-79 | RecastNavigation runtime tile add/remove (P3) | 04 §3.2 | `Gems/RecastNavigation/` | — |
-| V-80 | EMotionFX: root motion, anim events | 01 V03, V21 | `Gems/EMotionFX/` | — |
-| V-81 | UI stack (LyShine vs. newer) | 01 V33 | `Gems/LyShine/`; 26.05 release notes | — |
-| V-82 | Spline component | 01 V58 | `Code/Framework/AzFramework` / `Gems/LmbrCentral/Code/Source/Shape/SplineComponent*` | — |
-| V-83 | Light-level sampling for stealth (P3) | 01 V26 | Atom lights query / custom | — |
-| V-84 | Atom runtime material property API (paint) | 01 V15 | `Gems/Atom/Feature/Common/.../Material/MaterialComponentBus.h` | — |
-| V-85 | SerializeContext version converters (tooling export only) | 04 §3.10 | `AzCore/Serialization/SerializeContext.h` | — |
-| **External / policy** | | | | |
-| V-86 | Steam adult-content policy (2025 changes) | 01 §1.4 | Steamworks content survey docs | — |
+**B** = blocks P2 week 4–5. Evidence paths are relative to the engine repo at `2610.0`.
 
-**P2-blocking summary (23 rows marked B):**
-- V-01–V-04, V-08, V-10
-- V-22, V-27, V-28, V-30, V-31, V-34
-- V-35, V-37, V-39, V-42–V-45
-- **V-51**, **V-68** (bulk path, R3)
-- V-75 (gameplay P2)
-- V-77
+| ID | Claim (as originally assumed) | Status | Verified fact / resolution | Evidence | B |
+|---|---|---|---|---|---|
+| **Engine / build** | | | | | |
+| V-01 | Latest stable tag | ✔ | `2610.0` released 2026-11-20 (not a pre-release). **Locked 26.10.0** | GitHub release metadata | — |
+| V-02 | CLI syntax | ✔ | `register --this-engine`; `create-project -pp [-pn] [-tn]`; `create-gem -gp`; `enable-gem -gp/-gn -pp` | `scripts/o3de/o3de/register.py:929`, `engine_template.py:2834`, `enable_gem.py:174` | — |
+| V-03 | VS2022 17.14 supported; VS2026? | ◐ | Presets only vs2022/vs2019; min toolset v142. VS2026 is only a CMake-version warning, so treat it as unsupported | `cmake/Platform/Common/CMakePresets.json:123`, `MSVC/Configurations_msvc.cmake:41` | ○ task 1 |
+| V-04 | Bundled CMake ≥ 3.25, presets v6 | ✖ | Floor 3.24. Presets **v4**. Source checkouts bundle nothing. Install CMake **4.2.3**. Template fixed | `CMakeLists.txt:10`, `cmake/Packaging.cmake:42` | — |
+| V-05 | C++ standard | ✔ | C++20 (required) | `cmake/Configurations.cmake:173` | — |
+| V-06 | Bundled Python | ◐ | 3.10.13 via `get_python.bat` into `%USERPROFILE%\.o3de\Python`; `python.cmd` is a wrapper | `cmake/3rdParty/Platform/Windows/Python_windows.cmake:12` | — |
+| V-07 | Game gem in `Gem/` | ✔ | — | `Templates/DefaultProject/Template/Gem/CMakeLists.txt` | — |
+| V-08 | Gem file/target names | ✖ | `.API`, `.Private.Object`, module, `.Editor*`, `.Tests`; `_api/_private/_shared/_tests` file lists | `Templates/DefaultGem/Template/Code/CMakeLists.txt:28-248` | — |
+| V-09 | `LY_UNITY_BUILD`, `LY_MONOLITHIC_GAME` | ✔ | Unity ON by default. Monolithic disables tools/tests | `cmake/LYWrappers.cmake:9`, `cmake/Monolithic.cmake:9` | — |
+| V-10 | Target names | ✔ | `<Project>.GameLauncher`, `AssetProcessor`, `AssetProcessorBatch`, `Editor` | `Code/LauncherUnified/launcher_generator.cmake:170` | — |
+| V-11 | Test labels | ✔ | `SUITE_<suite>`; name `<NAME>.<suite>::TEST_RUN` | `cmake/LYTestWrappers.cmake:21,114` | — |
+| V-12 | Config defines | ✔ | See 03 §2.5. Release strips asserts/traces | `cmake/Platform/Common/Configurations_common.cmake:41` | — |
+| V-13 | AP batch flags | ✔ | `--platforms`, `--project-path`, … | `AssetProcessor/native/utilities/assetUtils.cpp:686` | — |
+| V-14 | `_savebackup` folder | ◐ | Inferred from AP excludes (`_savebackup`, `_autobackup`); both added to the ignore list later if seen | `Registry/AssetProcessorPlatformConfig.setreg:173` | — |
+| V-15 | PhysX5 gem | ◐ | `PhysX5` (+Debug). **PhysX 4 removed** | `Gems/PhysX/Core/PhysX5/gem.json:2` | — |
+| V-16 | ASan | ✔ | `LY_BUILD_WITH_ADDRESS_SANITIZER` | `MSVC/Configurations_msvc.cmake:173` | — |
+| V-17 | GitHub LFS pricing | ○ | External: check GitHub billing | — | — |
+| V-18 | Newer Blender LTS | ○ | External: check at setup | — | — |
+| **Assets / pipeline** | | | | | |
+| V-19 | `assets_source/` not scanned | ◐ | Not scanned by default; a project `ScanFolder` entry could add it (forbidden) | `AssetProcessorPlatformConfig.setreg:130` | — |
+| V-20 | LOD/collision node naming | ✔ | `_lod1`…`_lod5`, `_phys`, case-insensitive. **Our naming changed to `_LOD1…`, `_Phys`** | `Gems/SceneProcessing/Registry/SoftNameSettings.setreg:5` | — |
+| V-21 | `.assetinfo` is JSON | ✔ | — | `SceneCore/Containers/SceneManifest.cpp:150` | — |
+| V-22 | Texture suffix mapping | ◐ | Last `_` segment → `PresetsByFileMask` in `ImageBuilder.settings`; project override file `Config/AtomImageBuilder/ImageBuilder.settings`. **`_ORM` unmapped and unsupported by StandardPBR (`.r` only)**, so separate maps | `ImageBuilder.settings:46-205`; `RoughnessInput.azsli:49` | ○ task 5 |
+| V-23 | `parentMaterial` | ✔ | — | `RPI.Edit/Material/MaterialSourceData.cpp:51` | — |
+| V-24 | `.physxmaterial` | ✔ | — | `PhysXEditorMaterialAsset.h:28` | — |
+| V-25 | Particle asset type | ○ | Gem is `OpenParticleSystem`; asset type unchecked (P4) | `engine.json:60` | — |
+| V-26 | Sequence asset | ◐ | No standalone asset: `SequenceComponent` inside a prefab | `Gems/Maestro/Code/Source/Components/SequenceComponent.cpp:120` | — |
+| V-27 | Prefab → spawnable builder | ✔ | — | `Gems/Prefab/PrefabBuilder/PrefabBuilderComponent.cpp:54` | — |
+| V-28 | Stable editor ids; spawn regenerates ids | ✔ | Alias-path hash; `MakeId` per spawn | `InstanceEntityIdMapper.cpp:49`; `SpawnableEntitiesManager.cpp:351` | — |
+| V-29 | Editor prefab scaling | ○ | Empirical (R9) | — | task 9 |
+| V-30 | Custom AssetBuilder | ✔ | `AssetBuilderDesc` + `RegisterBuilderInformation` | `AssetBuilderSDK.h:242` | — |
+| V-31 | Custom AssetHandler | ✔ | `AssetManager::RegisterHandler`; `GenericAssetHandler<T>` | `AssetManager.h:172` | — |
+| V-32 | Cooked mesh product | ✔ | `.pxmesh` | `Pipeline/MeshAssetHandler.cpp:25` | — |
+| V-33 | Bundles / paks | ✔ | AssetBundler commands; `OpenPacks("@products@/*.pak")` | `AssetBundler/source/utils/utils.cpp:50`; `GameApplication.cpp:55` | — |
+| V-34 | Python prefab authoring | ◐ | Create entity / add components / `CreatePrefabInMemory` / `SaveTemplateToString`; **no direct file save** | `PrefabPublicRequestHandler.cpp:30`; `PrefabSystemComponent.cpp:92` | — |
+| **Runtime: core / streaming** | | | | | |
+| V-35 | Streamer deadline/priority/cancel | ✔ | Deadline µs, priority u8, `RescheduleRequest`, best-effort `Cancel`; callback on executor thread | `AzCore/IO/IStreamer.h:65-304` | — |
+| V-36 | AssetManager async threads | ◐ | Load in `LoadAssetJob`; **ready events on main via `DispatchEvents`**; no load cancel | `AssetManager.cpp:127,1827` | — |
+| V-37 | Spawnable API & threading | ✔ | Main thread at TICK_GAME; **auto-activate; not sliced; no cancel of queued spawns**; two priority lanes. Design changed to batched `SpawnEntities` | `SpawnableEntitiesInterface.h:32-430`; `SpawnableSystemComponent.cpp:52` | — |
+| V-38 | Job API | ◐ | Both `AZ::Job` (AssetManager, PhysX) and `AZ::TaskGraph` (newer) live; ours uses TaskGraph | `AzCore/Task/TaskGraph.h:34` | — |
+| V-39 | Allocators | ✔ | `AZ_CLASS_ALLOCATOR`, `AZ_CHILD_ALLOCATOR_WITH_NAME`; PoolAllocator not thread-safe | `Memory/ChildAllocatorSchema.h:20`; `PoolAllocator.h:197` | — |
+| V-40 | Allocation records / fragmentation | ◐ | `allocator_tracking_<Name>=<Mode>` via startup cfg; `sys_DumpAllocators`; **no fragmentation stats** | `AllocatorManager.cpp:244`; `IAllocator.h:214` | ○ wk 5 |
+| V-41 | Memory stats API | ✔ | `GetAllocatorStats`; `QueryMemInfo` | `AllocatorManager.h:108`; `Process/ProcessInfo.h:21` | — |
+| V-42 | EBus traits; `AZ::Interface` | ✔ | Verified and compile-tested | `EBus/Policies.h:29,63`; `Interface/Interface.h:24` | — |
+| V-43 | Component macros | ✔ | `AZ_COMPONENT_DECL/IMPL` (template) or `AZ_COMPONENT`; compile-tested | `Component/Component.h:382-504` | — |
+| V-44 | TickBus + physics placement | ✔ | INPUT 75, GAME 80, PHYSICS_SYSTEM 200 (static-asserted); PhysX blocks main | `TickBus.h:28`; `PhysX/.../SystemComponent.cpp:443` | — |
+| V-45 | Include paths | ✔ | Compile-tested | — | — |
+| V-46 | `AZ_TYPE_INFO_SPECIALIZE` | ◐ | Exists; must be placed in the type's namespace or `AZ` | `RTTI/TypeInfoSimple.h:64` | — |
+| V-47 | CVars from launcher command line | ◐ | `AZ_CVAR`; `--name=value` executed after gems load; `--console-command-file` | `ComponentApplication.cpp:1001`; `Launcher.cpp:601` | — |
+| **Rendering (Atom)** | | | | | |
+| V-48 | DX12 feature level | ✔ | `D3D_FEATURE_LEVEL_12_0` | `RHI/DX12/.../SystemComponent_Windows.cpp:56` | — |
+| V-49 | Render threading | ◐ | **No render thread**: RPI ticks on main, jobs record. Budget rebuilt | `RHISystem.cpp:283`; `BootstrapSystemComponent.cpp:874` | ○ task 8 |
+| V-50 | Float world, no camera-relative | ✔ | — | `TransformServiceFeatureProcessor.h:57`; `ViewSrg.azsli:15` | — |
+| V-51 | Entity-less mesh API | ✔ | **GO with caveats**: main-thread only, no locks, per-handle cost, ray tracing default true. Design changed (merged sections, ≤ 24 k handles) | `MeshFeatureProcessorInterface.h:154-302` | — |
+| V-52 | Automatic instancing | ◐ | **Off by default** (`r_meshInstancingEnabled`); shared materials required; disables `SetDrawItemEnabled` | `MeshFeatureProcessor.cpp:2077` | — |
+| V-53 | Frustum culling via octree | ✔ | Octree ±16 384 m | `RPI.Public/Culling.cpp:135`; `OctreeSystemComponent.cpp:16` | — |
+| V-54 | Occlusion planes + MOC | ◐ | Planes only occlude; MOC fixed 1080p; no cap/CVar | `Culling.cpp:608` | — |
+| V-55 | Per-LOD screen thresholds | ◐ | **Per-mesh** `LodConfiguration` (coverage + decay). Design changed | `RPI.Public/Culling.h:81` | — |
+| V-56 | Shadow LOD / exclusion | ◐ | No shadow LOD; exclusion via material `castShadows`. Design changed (`_NoShadow` materials) | `DirectionalLightFeatureProcessor.cpp:1158` | — |
+| V-57 | Light culling limits | ◐ | Tiled; 256 lights per tile max | `CoreLights/LightCullingConstants.h` | — |
+| V-58 | Dithered LOD cross-fade | ✖ | Not supported; popping accepted | `Culling.cpp:980` | — |
+| V-59 | Streaming pool budget; force-resident mips | ◐ | `r_streamingImagePoolBudgetMb`, mip bias, `SetTargetMip`/`SetStreamingPriority`; **no hard pin** | `StreamingImagePool.h:65`; `StreamingImage.h:94` | — |
+| V-60 | Probe format BC6H | ✖ | **R9G9B9E5**. Budget recomputed (128² chunk probes) | `IBLSpecular.preset:13` | — |
+| V-61 | DiffuseProbeGrid | ✔ | Real-time needs ray tracing; not used | `DiffuseProbeGridFeatureProcessorInterface.h:25` | — |
+| V-62 | RHI memory stats | ✔ | `RHIMemoryStatisticsInterface`; ImGui GPU memory view | `RHIMemoryStatisticsInterface.h` | — |
+| V-63 | Draw/tri stats | ✔ | `GetFrameStatistics`; pipeline-statistics queries | `PassSystemInterface.h:56` | — |
+| V-64 | Buffer pool sub-allocation | ◐ | Sub-allocates; **no defragmentation** | `DX12/.../BufferMemoryAllocator.h:44` | — |
+| V-65 | Video playback | ○ | `VideoPlaybackFramework` gem listed, not checked; AD-14 avoids it anyway | `engine.json` | — |
+| V-66 | Render-to-texture | ◐ | `RenderToTexturePass`, `CreateRenderPipelineForImage` (deferred feature) | `RenderToTexturePass.h` | — |
+| V-67 | Ocean water gem | ○ | Not checked; AD-02 avoids it | — | — |
+| **Physics** | | | | | |
+| V-68 | Entity-less static bodies | ◐ | `AddSimulatedBodies` + `StaticRigidBodyConfiguration`; **main thread, outside the physics tick** | `PhysicsScene.h:71-321`; `PhysXScene.h:136` | — |
+| V-69 | Sleep threshold | ✔ | `m_sleepMinEnergy = 0.005` (≈ 0.1 m/s) | `RigidBodyConfiguration.h:54` | — |
+| V-70 | Origin shift not exposed | ✔ | Not exposed anywhere | grep: no hits | — |
+| V-71 | No double-precision build | ✔ | Float only | `Math/Vector3.h:342` | — |
+| V-72 | CCD config | ✔ | `m_ccdEnabled` per body + scene `m_enableCcd` (default false) | `RigidBodyConfiguration.h:61`; `SceneConfiguration.h:40` | — |
+| V-73 | Character controller | ✔ | `PhysX::CharacterControllerComponent` | `CharacterControllerComponent.h:32` | — |
+| V-74 | Raycast API | ✔ | `RayCastRequest` + `QueryScene` (+ batch/async) | `PhysicsSceneQueries.h:163` | — |
+| V-75 | Vehicle gem | ○ | Not in checkout; P2 gameplay decides (custom raycast vehicle) | — | P2 gameplay |
+| **Other gems** | | | | | |
+| V-76 | Profiler macros | ✔ | `AZ_PROFILE_SCOPE(budget, …)` + `AZ_DECLARE/DEFINE_BUDGET`; pluggable via `AZ::Interface<Profiler>`; no Tracy | `Debug/Profiler.h:25`; `Debug/Budget.h:53` | — |
+| V-77 | ImGui in launcher | ◐ | Yes; **not compiled out in release** (CMake bug), so we guard the HUD ourselves | `Gems/ImGui/Code/CMakeLists.txt:8,108` | — |
+| V-78 | Terrain gem streaming (rejected path) | ◐ | Spawners register at Activate, so runtime-spawnable; box shapes; clipmaps are material-only. Revisit P2 wk 6 | `TerrainLayerSpawnerComponent.cpp:100` | — |
+| V-79 | Recast tile streaming | ◐ | No public per-tile API; raw `dtNavMesh` `addTile/removeTile` via `GetNavigationObject()` | `RecastNavigationMeshBus.h:26` | P3 |
+| V-80 | EMotionFX root motion / events | ✔ | `MotionExtractionRequestBus`; `OnMotionEvent` | `Integration/MotionExtractionBus.h:21` | — |
+| V-81 | UI stack | ✔ | LyShine | `Gems/LyShine/gem.json` | — |
+| V-82 | Spline component | ✔ | `LmbrCentral::SplineComponent` | `Shape/SplineComponent.h:56` | — |
+| V-83 | Light-level sampling (stealth) | ○ | P3 | — | P3 |
+| V-84 | Runtime material properties | ◐ | `Material::SetPropertyValue` + `Compile`; shared vs. unique instances affect instancing | `RPI.Public/Material/Material.h:65` | — |
+| V-85 | SerializeContext versioning | ✔ | `Version(n, VersionConverter)` | `Serialization/SerializeContext.h:151` | — |
+| V-86 | Steam adult-content policy | ○ | External, before P5 | — | — |
+| **New from triage** | | | | | |
+| V-87 | `AssetLoadParameters` carries deadline/priority for our loads | ○ | Week 5 spike | `AzCore/Asset/AssetCommon.h` (likely) | B |
+| V-88 | `Physics::SystemRequests::CreateShape` is safe off the main thread | ○ | Task 4 (E4) | `AzFramework/Physics/SystemBus.h` | B |
+| V-89 | Entity references stay valid across multiple `SpawnEntities` calls on one ticket | ○ | Task 2 (E1) | `SpawnableEntitiesManager.cpp` | B |
+| V-90 | Occluder planes can be created/enabled from gem code without entities | ○ | Week 5 spike (`OcclusionCullingPlaneFeatureProcessorInterface`) | `Feature/Common/.../OcclusionCullingPlane/` | B |
+| V-91 | Exact per-LOD coverage derivation from `m_qualityDecayRate` | ○ | Task 3 (E3) records switch distances | `MeshFeatureProcessor.cpp:2686` | — |
+| V-92 | `gem.json` dependency names for our gem | ○ | Task 1 | generated `gem.json` | B |
 
-Tasks 1–10 above cover all except:
-- **V-30, V-31, V-35, V-39**: Week 5 spike covering the ChunkData builder + runtime asset handler, AZ::IO Streamer deadlines/cancel, and allocator wiring for the block pool.
-- **V-75**: first item of P2 gameplay prototyping.
+**Triage totals:**
+- **46 ✔ confirmed**
+- **31 corrected (27 ◐ + 4 ✖) with docs updated:** 03 stack/naming/build, 04 v0.2, 05, headers, CMake presets
+- **15 open (○)**:
+  - 5 new P2-blocking spikes: V-87–V-90, V-92
+  - 2 Week-4 runtime checks: V-03, V-22
+  - the rest are external or later-phase
+
+The design changes these forced are listed at the top of 04 v0.2.

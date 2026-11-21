@@ -11,29 +11,30 @@ The literal files are the source of truth and are **not duplicated here** (this 
 
 ## 2.1 Stack Lock
 
-**Fact:** O3DE **26.05** is the latest confirmed stable release (May 2026). 26.10 is planned but not confirmed shipped. 26.05 makes PhysX 5 the default for new projects and bundles CMake. Sources: o3de.org download page, 26.05 release notes.
+**Fact (updated 2026-11-21):** O3DE **26.10.0** was released on 2026-11-20 (GitHub release `2610.0`, not a pre-release; source commit `b6122815`). 26.05.0 (2026-05-27) never received a patch release. 26.05 made PhysX 5 the default for new projects and bundled CMake. Engine claims below are being checked against the `2610.0` source (06 §4.6).
+**Decision:** lock **26.10.0**. *Why:* nothing has been built yet, so switching now is free. It also gives the longest support window and avoids a forced mid-production upgrade (risk R1). *Risk:* a brand-new `.0` release; the Week-4 spikes surface regressions early. *Rejected:* 26.05.0 (more field time, but a likely upgrade during P2–P5).
 
 | Item | Locked choice | Rationale (one line) |
 |---|---|---|
-| Engine | **O3DE 26.05.x**, the latest 26.05 patch at setup [VERIFY patch tag on GitHub releases]. **Built from source** at the pinned tag, cloned **outside** the repo (e.g. `D:\o3de\26.05`) and registered with `o3de register` [VERIFY CLI] | Source lets me debug and patch the streaming path into the engine. Out-of-repo keeps the engine's multi-GB LFS history out of ours |
-| Engine upgrade policy | **No engine upgrades inside a phase.** Evaluate 26.10 only at the P2 exit gate, and only for a blocking fix | O3DE API churn is risk #1 for a solo dev |
+| Engine | **O3DE 26.10.0** (tag `2610.0`; take `2610.1` only if it ships before the engine build in Week 4). **Built from source** at the pinned tag, cloned **outside** the repo (e.g. `D:\o3de\26.10`) and registered with `o3de register` [VERIFY CLI] | Source lets me debug and patch the streaming path into the engine. Out-of-repo keeps the engine's multi-GB LFS history out of ours |
+| Engine upgrade policy | **No engine upgrades inside a phase.** Point releases (26.10.x) are evaluated at phase gates. The next major (27.05) only at the P3 exit, and only for a blocking fix | O3DE API churn is risk #1 for a solo dev |
 | Engine patches | Kept as `.patch` files in `/tools/engine_patches/`; target = zero | Re-applicable on upgrade and auditable |
-| Physics | PhysX 5 (26.05 default) [VERIFY gem name `PhysX5` vs. `PhysX`] | Default path = most tested |
-| Graphics API | **DX12 primary**, Vulkan secondary (smoke-tested monthly) | Windows-only target; PIX gives the best DX12 tooling |
-| IDE / compiler | **Visual Studio 2022 17.14** (MSVC v143 toolset), x64 [VERIFY 26.05 lists VS2022 as supported; VS2026 support unknown] | Officially supported generator; 17.14 is the long-lived final 2022 band |
+| Physics | **`PhysX5`** gem (+ `PhysX5Debug`). This is the DefaultProject template default, and **PhysX 4 is gone** from 26.10 ✔ | Only option shipped |
+| Graphics API | **DX12 primary**, Vulkan secondary (smoke-tested monthly). Atom requires `D3D_FEATURE_LEVEL_12_0` ✔ | Windows-only target; PIX gives the best DX12 tooling |
+| IDE / compiler | **Visual Studio 2022 17.14** (MSVC v143), x64. The engine presets cover only `vs2022`/`vs2019`; minimum toolset v142. VS2026 ("Visual Studio 18") is only acknowledged by a CMake-version warning, so **treat it as unsupported** ✔ | Only officially preset-covered generator |
 | Windows SDK | 10.0.22621 or newer (engine floor: 10.0.19041) | Meets the documented floor with headroom |
-| CMake | **Engine-bundled CMake** (26.05) [VERIFY bundled version ≥ 3.25, required by presets v6]; fallback: install CMake ≥ 3.25 | One less version to manage |
-| C++ standard | Engine-set standard [VERIFY 17 vs. 20 in 26.05 `cmake/` config]. **Our code is written to the C++17 subset** (no concepts, ranges, modules or coroutines) | Compiles unchanged whichever standard the engine sets, and survives upgrades |
-| Python (tooling) | **Engine-bundled Python** (`<engine>/python/python.cmd`) [VERIFY version, historically 3.10.x]. Repo tools are stdlib-only | One interpreter; the same one O3DE editor scripts use |
+| CMake | **Install CMake 4.2.3** (the version the engine's packaging pins as tested). The engine floor is `cmake_minimum_required(3.24)`. **A source checkout bundles no CMake**; bundling exists only in installer builds (`<engine>/cmake/runtime/bin`). Presets use schema **v4**, matching the engine's own files ✔ | Match the engine's tested version |
+| C++ standard | Engine sets **C++20** (`CMAKE_CXX_STANDARD 20`, required) ✔. Gem code may use C++20. **`Source/Core` stays within C++17** so `tests/core_standalone` builds anywhere | Engine fact; Core portability is our own choice |
+| Python (tooling) | Engine Python **3.10.13**, downloaded by `python/get_python.bat` into `%USERPROFILE%\.o3de\Python` (per-engine venv). `python/python.cmd` is a wrapper. Repo tools are stdlib-only ✔ | One interpreter; the same one O3DE editor scripts use |
 | DCC | **Blender 4.5 LTS** (FBX export) [VERIFY whether a newer LTS exists at setup; adopt only at a phase boundary] | Free, LTS stability, mature FBX exporter |
 | Texture authoring | Deferred to P4 (Scope Flag) | Out of Phase 1 scope |
 | VCS | Git ≥ 2.45 + Git LFS ≥ 3.5 | Standard; LFS for all binaries |
-| Remote | **GitHub private repo + LFS data packs**, plus a weekly mirror (`git push --mirror` + `git lfs push --all`) to a local NAS/external drive [VERIFY current GitHub LFS quota/pricing] | `gh` tooling. The mirror covers host and quota risk |
-| CPU profiling | **O3DE built-in profiler** (Profiler gem, ImGui visualizer, `AZ_PROFILE_SCOPE` markers) [VERIFY gem/macro names in 26.05] | Zero integration cost; the engine is already instrumented |
+| Remote | **GitHub public repo** (`sachinkumar2245/low-tide`) **+ LFS**, plus a weekly mirror (`git push --mirror` + `git lfs push --all`) to a local NAS/external drive [VERIFY current GitHub LFS quota/pricing] | `gh` tooling. The mirror covers host and quota risk |
+| CPU profiling | **O3DE built-in profiler** (Profiler gem, ImGui visualizer). Markers: `AZ_PROFILE_SCOPE(LowTideStreaming, "…")` with `AZ_DECLARE_BUDGET`/`AZ_DEFINE_BUDGET`; the backend is pluggable via `AZ::Interface<AZ::Debug::Profiler>` ✔ | Zero integration cost; the engine is already instrumented |
 | GPU profiling / frame debug | **PIX on Windows** (DX12 timing, GPU captures, memory). **RenderDoc** (frame debugging, both APIs) | Both free. PIX is authoritative for DX12 |
 | Vendor tools | Nsight Graphics/Systems only if the dev GPU is NVIDIA. AMD Radeon GPU Profiler if AMD | Use whatever matches the hardware |
 | I/O / thread timeline | Windows Performance Recorder/Analyzer (ETW) | Validates streaming I/O under load without code changes |
-| Memory | O3DE allocator tracking [VERIFY 26.05 mechanism/CVar] + per-chunk arena tags (Part 3 §3.5) + MSVC ASan (`win-vs2022-asan` preset) [VERIFY O3DE runs under ASan with its allocators] | Leak and corruption detection across thousands of load/unload cycles |
+| Memory | O3DE allocator tracking [VERIFY mechanism/CVar] + per-chunk arena tags (Part 3 §3.5) + ASan via the engine option **`LY_BUILD_WITH_ADDRESS_SANITIZER=ON`** (adds `/fsanitize=address`; `win-vs2022-asan` preset) ✔ | Leak and corruption detection across thousands of load/unload cycles |
 | Tracy | **Not adopted in P1.** Re-evaluate at P2 week 2 if the built-in profiler can't show streaming job timelines clearly | Needs an integration gem plus maintenance |
 | Code format | `.clang-format` copied from the pinned engine tag | Matches engine style; no bikeshedding |
 
@@ -88,7 +89,7 @@ The repo root is the current `my-game/` folder. Rename it to `low-tide/` before 
     │           ├── Source/Core/               # engine-independent logic (std-only C++)
     │           ├── Source/Engine/             # O3DE glue: components, EBus handlers, I/O, spawning
     │           ├── Tests/                     # AzTest/GoogleTest unit + integration tests
-    │           └── *_files.cmake              # source lists [VERIFY template naming]
+    │           └── lowtidestreaming_{api,private,shared,tests}_files.cmake  # source lists (DefaultGem template ✔)
     ├── Assets/                     # ENGINE-INGESTED sources (exported FBX/PNG/WAV, .material, .prefab)
     │   ├── Characters/             # SK_ meshes, A_ animations, per character folder
     │   ├── Vehicles/               # one folder per vehicle archetype
@@ -119,8 +120,8 @@ The repo root is the current `my-game/` folder. Rename it to `low-tide/` before 
 - *Rejected:* streaming inside the game gem, which invites gameplay↔streaming coupling and slower tests. Splitting into more than two gems (Core gem + Engine gem) adds boilerplate with no isolation gain over a folder split.
 
 **Assets/ vs assets_source/:**
-- The Asset Processor only scans the project's `Assets/` (and gems).
-- `assets_source/` sits outside `LowTide/`, so it is never scanned [VERIFY default scan folders in `AssetProcessorPlatformConfig.setreg`].
+- Default scan folders (✔): the project root (recursive), the engine root (non-recursive), engine `Assets/Engine` and `Assets/Editor`, engine `Registry`, and each active gem's `Assets/`.
+- `assets_source/` sits outside `LowTide/`, so it is never scanned, unless someone adds a `ScanFolder` entry in a project setreg. Don't.
 - Exported files are committed in `Assets/`. Working files are committed in `assets_source/`. Both are LFS.
 
 ---
@@ -224,36 +225,57 @@ Command: `git tag -a v0.1.0 -m "Phase 1 exit: design + repo"` then `git push ori
 
 | Type | Prefix | Required suffix(es) | Extension(s) | Example |
 |---|---|---|---|---|
-| Static mesh | `SM_` | mesh nodes `_LOD0…_LOD3`, collision node `_COL` [VERIFY O3DE scene-builder LOD/physics node naming rules] | .fbx | `SM_OM_Storefront_A.fbx` |
-| Skeletal mesh | `SK_` | `_LOD0…` | .fbx | `SK_Char_TylerReed.fbx` |
+| Static mesh | `SM_` | Mesh nodes: base node = LOD0 (no suffix), then `_LOD1…_LOD3`. Collision node `_Phys`. The engine matches `_lod1`…`_lod5` and `_phys` case-insensitively ✔ | .fbx | `SM_OM_Storefront_A.fbx` |
+| Skeletal mesh | `SK_` | base = LOD0, `_LOD1…` | .fbx | `SK_Char_TylerReed.fbx` |
 | Animation | `A_` | — | .fbx | `A_Char_Melee_Jab_L.fbx` |
 | Anim graph / motion set | `AG_` / `MS_` | — | .animgraph / .motionset | `AG_Char_Locomotion.animgraph` |
 | Master material | `M_` | — | .material (StandardPBR-based) | `M_Master_Opaque.material` |
-| Material instance | `MI_` | — | .material (parent = an `M_`) [VERIFY Atom parent-material inheritance] | `MI_OM_Brick_Red.material` |
+| Material instance | `MI_` | `_NoShadow` variant for non-casting content (04 §3.6f) | .material (`parentMaterial` = an `M_`) ✔ | `MI_OM_Brick_Red.material`, `MI_OM_Litter_A_NoShadow.material` |
 | Custom material type | `MT_` | — | .materialtype (P4+, likely none) | `MT_Water_Global.materialtype` |
-| Texture | `T_` | `_BC` base color, `_N` normal, `_ORM` occl/rough/metal, `_E` emissive, `_M` mask, `_H` height, `_O` opacity | .png / .tif / .exr | `T_OM_Brick_Red_ORM.png` |
+| Texture | `T_` | **Type suffix is always the last segment**: `_BC` base color, `_N` normal, `_Rough` roughness (mandatory), `_Metal` / `_AO` (optional), `_E` emissive, `_H` height, `_O` opacity, `_Mask` mask. **No channel-packed maps** (StandardPBR reads `.r` only) ✔ | .png / .tif / .exr | `T_OM_Brick_Red_Rough.png` |
 | Prefab | `PF_` | — | .prefab | `PF_OM_StreetLamp_A.prefab` |
 | Chunk prefab | `PF_Chunk_` | `_<Layer>` (Static, Props, Gameplay, Lights, Audio) | .prefab | `PF_Chunk_X012_Y007_Static.prefab` |
 | Interior cell | `Cell_` | `_<Layer>` | .prefab | `Cell_OM_MackWorkshop_Static.prefab` |
 | Vignette cell | `Vig_` | — | .prefab | `Vig_Pro_PrisonGate.prefab` |
 | HLOD / skyline proxy | `HL_` | `_T1`, `_T2` (tier) | .fbx | `HL_Chunk_X012_Y007_T1.fbx`, `HL_Skyline_NB_T2.fbx` |
 | Level | `L_` | — | level folder/prefab | `L_World`, `L_StreamingTestbed` |
-| Physics material | `PM_` | — | .physxmaterial [VERIFY extension] | `PM_Asphalt_Wet.physxmaterial` |
+| Physics material | `PM_` | — | .physxmaterial ✔ | `PM_Asphalt_Wet.physxmaterial` |
 | SFX / VO / music / ambience | `SFX_` / `VO_` / `MUS_` / `AMB_` | VO: `VO_<Char>_<MissionId>_<LineNNN>` | .wav / .ogg | `VO_Lena_P00_L014.wav` |
-| VFX | `FX_` | — | engine particle asset (P4) [VERIFY 26.05 particle asset type] | `FX_Splash_Vehicle_A` |
+| VFX | `FX_` | — | `OpenParticleSystem` gem asset (P4) [VERIFY asset extension] | `FX_Splash_Vehicle_A` |
 | UI | `UI_` | — | .uicanvas / .png | `UI_HUD_StreamingDebug.uicanvas` |
 | Data table | `DT_` | — | .json / .setreg | `DT_StreamingConfig_Default.setreg` |
-| Sequence/cutscene | `SEQ_` | — | engine sequence asset [VERIFY] | `SEQ_P00_BusArrival` |
+| Sequence/cutscene | `SEQ_` | — | **No standalone asset**: a Track View sequence lives in a `SequenceComponent` inside a prefab ✔. Name the *sequence entity* `SEQ_…` and keep each sequence in its own `PF_SEQ_…` prefab to limit merge conflicts | `PF_SEQ_P00_BusArrival.prefab` |
 | Spline data | `SPL_` | — | .json | `SPL_P00_BusRoute.json` |
 | Source files | same name as the export | — | .blend/.spp/.psd | `assets_source/blender/Props/SM_OM_Storefront_A.blend` |
 
-**Texture suffix → O3DE image preset mapping:** the O3DE image builder selects presets by filename suffix. Our `_BC/_N/_ORM/...` suffixes must be mapped to presets in a project `.setreg` override, or set per-file via `.assetinfo` [VERIFY image builder suffix-mapping config location and keys in 26.05]. **This is a P2 day-1 task.** If the suffixes aren't mapped, normals import as sRGB color, which is silently wrong.
+**Texture suffix → O3DE image preset mapping (verified, 26.10):**
+- The image builder takes the text after the **last `_`** in the base name (lowercased) and looks it up in `PresetsByFileMask`. The table lives in `Gems/Atom/Asset/ImageProcessingAtom/Assets/Config/ImageBuilder.settings`.
+- Every suffix above maps by default:
+
+| Suffix | Preset | Format |
+|---|---|---|
+| `_bc` | Albedo | BC1 |
+| `_n` | Normals | BC5s |
+| `_rough` | Reflectance | BC4, linear |
+| `_metal` | Reflectance | BC4, linear |
+| `_ao` | AmbientOcclusion | BC4 |
+| `_e` | Emissive | — |
+| `_h` | Displacement | — |
+| `_o`, `_mask` | Opacity | BC4, linear |
+
+- **No project override is needed.** If one is ever needed, it goes in the project file `Config/AtomImageBuilder/ImageBuilder.settings` (merge-patched), *not* a `.setreg`.
+- **Hazard:** an unmatched suffix silently falls back to Albedo (sRGB). For example `T_X_N_01` resolves to mask `_01`.
+- **Hazard:** `_m` maps to Reflectance, which is why masks use `_Mask`.
+- The P2 day-1 task becomes a one-texture-per-suffix import check.
 
 ### Chunk / cell / ID naming
 - Chunk: `Chunk_X<nnn>_Y<nnn>`, zero-padded to 3 digits. Origin = **south-west corner** of the world grid. +X = east, +Y = north. Coordinates are grid indices, not meters (chunk size is set in Part 3).
 - Chunk folder: `Assets/World/Chunks/<DistrictCode>/Chunk_X012_Y007/`. The district is assigned by the chunk's majority area and is used for folder organisation only. The ID is the coordinate.
 - Mission IDs: `P00` (Prologue), `M01`…`M17`, `A1E`, `A2E`. Chains: `C<Char><nn>` (e.g. `CLena03`).
-- Stable entity IDs for AD-09 deltas: assigned by the editor/prefab system and never hand-written [VERIFY prefab entity id stability across edits].
+- Stable IDs for AD-09 deltas:
+  - Editor EntityIds are a hash of the entity alias path, so they're stable while the alias is unchanged ✔.
+  - Runtime spawns generate fresh EntityIds ✔.
+  - So `StableId.local` is our own authored u32, stored as a component property and assigned by the generator/editor tool. It's never derived from EntityIds, and never hand-written.
 
 ### C++ naming (matches O3DE style)
 
@@ -276,14 +298,24 @@ Command: `git tag -a v0.1.0 -m "Phase 1 exit: design + repo"` then `git push ori
 | Tests | `<Type>Tests.cpp`. Test names `<Unit>_<Condition>_<Expected>` | `ChunkHandle_StaleGeneration_ResolvesNull` |
 
 ### Gem naming
-PascalCase, prefixed `LowTide`: `LowTide` (project/game gem), `LowTideStreaming`. CMake targets follow the engine's gem target pattern (`<Gem>.Static`, `<Gem>`, `<Gem>.Editor`, `<Gem>.Tests`) [VERIFY current gem template target names].
+PascalCase, prefixed `LowTide`: `LowTide` (project/game gem), `LowTideStreaming`.
+
+CMake targets follow the 26.10 DefaultGem template ✔:
+- `<Gem>.API` (INTERFACE)
+- `<Gem>.Private.Object` (STATIC)
+- `<Gem>` (runtime module)
+- `<Gem>.Editor.API`, `<Gem>.Editor.Private.Object`, `<Gem>.Editor`
+- `<Gem>.Tests`, `<Gem>.Editor.Tests`
+- Aliases `.Clients/.Servers/.Unified/.Tools/.Builders`
+
+File lists: `<gem>_api_files.cmake`, `_private_files`, `_shared_files`, `_tests_files`, plus `_editor_*` variants. Plain `<gem>_files.cmake` is used only by the project's game gem in `Gem/`.
 
 ### Examples
 
 | ✅ Good | ❌ Bad (rule broken) |
 |---|---|
 | `SM_OM_Storefront_A.fbx` | `storefront_final2.fbx` (no prefix, lowercase, revision in name) |
-| `T_TC_Container_Rust_N.png` | `T_TC_Container_Rust_Normal.png` (non-standard suffix → wrong image preset) |
+| `T_TC_Container_Rust_N.png` | `T_TC_Container_Rust_N_01.png` (type suffix not last → falls back to the sRGB Albedo preset) |
 | `PF_Chunk_X012_Y007_Props.prefab` | `PF_Chunk_12_7.prefab` (no padding, no axis letters, no layer) |
 | `VO_Mack_M02_L031.wav` | `VO Mack line 31.wav` (spaces, no mission ID) |
 | `MI_GM_Neon_Pink_A.material` | `MI_GlassMileNeonPinkVariantANightVersionForTheSaintExterior.material` (> 64 chars, scope not coded) |
@@ -295,7 +327,7 @@ PascalCase, prefixed `LowTide`: `LowTide` (project/game gem), `LowTideStreaming`
 - Rules table: extension + folder → required prefix regex, suffix set, max length, ASCII set.
 - Extra checks:
   - Chunk coordinates are inside the world grid bounds (read from `DT_StreamingConfig_Default.setreg`).
-  - Every `T_` has a recognised suffix.
+  - Every `T_` ends in a recognised type suffix, cross-checked against the engine's `PresetsByFileMask` so the validator and the engine can't disagree.
   - Every `SM_` export has a sibling `.assetinfo` (LOD and collision node checks are done in the LOD validator, Part 3 §3.7).
   - No `assets_source/` file lacks a matching export, *warn only*.
   - No binary extension is missing an LFS attribute (`git check-attr filter`).
@@ -314,25 +346,34 @@ PascalCase, prefixed `LowTide`: `LowTide` (project/game gem), `LowTideStreaming`
 
 ### Project creation (one-time, after engine build)
 
-1. Build the engine at the pinned tag per the O3DE docs and register it: `scripts\o3de.bat register --this-engine` [VERIFY].
-2. Create the project: `scripts\o3de.bat create-project --project-path <repo>\LowTide --template-name DefaultProject` [VERIFY flags/template name in 26.05].
-3. Create the streaming gem: `scripts\o3de.bat create-gem --gem-path <repo>\LowTide\Gems\LowTideStreaming` and register/enable it on the project [VERIFY `register --gem-path` / `enable-gem` subcommands].
-4. Copy `tools/templates/CMakePresets.json` to `LowTide/CMakePresets.json`.
-5. Commit: `build(repo): create O3DE project and streaming gem`.
+Every command below is verified against the 26.10 CLI argparse definitions ✔. A bare `o3de` command only exists with the installer, so a source build uses `scripts\o3de.bat`.
+
+0. Install CMake 4.2.3. Clone the engine at tag `2610.0` (with `git lfs install` done first). Run `python\get_python.bat` (creates the 3.10.13 venv).
+1. Build the engine and register it: `scripts\o3de.bat register --this-engine`.
+2. Create the project: `scripts\o3de.bat create-project -pp <repo>\LowTide -pn LowTide`. The template defaults to `DefaultProject`, which enables `PhysX5`.
+3. Create the streaming gem: `scripts\o3de.bat create-gem -gp <repo>\LowTide\Gems\LowTideStreaming`. The template defaults to `DefaultGem`.
+4. Enable it: `scripts\o3de.bat enable-gem -gp <repo>\LowTide\Gems\LowTideStreaming -pp <repo>\LowTide`.
+5. Copy `tools/templates/CMakePresets.json` to `LowTide/CMakePresets.json`. Copy `tools/templates/LowTideStreaming/Code/*` into the gem, merging with the generated files.
+6. Commit: `build(repo): create O3DE project and streaming gem`.
 
 ### Presets ([template](../tools/templates/CMakePresets.json))
 
 | Preset | Configs | Use |
 |---|---|---|
-| `win-vs2022` (configure) | debug; profile; release | Daily dev. Multi-config VS generator, unity build on [VERIFY `LY_UNITY_BUILD`] |
-| `win-vs2022-mono` | release | Shipping-shaped monolithic launcher [VERIFY `LY_MONOLITHIC_GAME`] |
-| `win-vs2022-asan` | debug | ASan runs of launcher + tests. Unity off for clearer reports |
-| build `profile` | — | **Default daily config**: optimised + profiler markers + asserts. Targets Editor, GameLauncher, AssetProcessorBatch [VERIFY target names] |
-| build `debug` | — | Only when stepping through code (much slower) |
-| build `release` | — | Weekly smoke from P5. Before that, only at phase exits |
-| test `profile-tests` | — | ctest over LowTide-named tests [VERIFY O3DE test labels/naming, e.g. `SUITE_main`] |
+| `win-vs2022` (configure) | debug; profile; release (`LY_CONFIGURATION_TYPES`) ✔ | Daily dev. `LY_UNITY_BUILD` is ON by default ✔ |
+| `win-vs2022-mono` | release | `LY_MONOLITHIC_GAME=ON`: defines `AZ_MONOLITHIC_BUILD`, builds gems static, **disables tools and tests** ✔. Release launcher only |
+| `win-vs2022-asan` | debug | `LY_BUILD_WITH_ADDRESS_SANITIZER=ON` ✔. Unity off for clearer reports |
+| build `profile` | — | **Default daily config.** Targets `Editor`, `LowTide.GameLauncher`, `AssetProcessor`, `AssetProcessorBatch` ✔ |
+| build `debug` | — | Only when stepping through code |
+| build `release` | — | Weekly smoke from P5 |
+| test `profile-tests` | — | ctest name filter `LowTide` + label `SUITE_main` ✔. Tests register via `ly_add_googletest`. ctest names are `<NAME>.<suite>::TEST_RUN`. Suites: smoke/main/periodic/benchmark/sandbox/awsi. The benchmark suite is used for E-tests |
 
-Configuration semantics (O3DE): **debug** = no optimisation, full checks. **profile** = optimised with debug info and profiling enabled. **release** = optimised, profiling and most asserts stripped [VERIFY exact define set per config].
+Configuration semantics (verified defines ✔):
+- **debug:** `_DEBUG AZ_DEBUG_BUILD AZ_ENABLE_TRACING AZ_ENABLE_DEBUG_TOOLS`
+- **profile:** `_PROFILE AZ_PROFILE_BUILD NDEBUG AZ_ENABLE_TRACING AZ_ENABLE_DEBUG_TOOLS`
+- **release:** `_RELEASE RELEASE AZ_RELEASE_BUILD NDEBUG`. Asserts and traces are compiled out; profile budgets are inert.
+
+**ImGui caveat:** ImGui is *not* compiled out in release (✔ V-77, a generator-expression bug in its CMake). So our HUD code wraps itself in `#if !defined(_RELEASE)`.
 
 Commands:
 ```bat
@@ -356,7 +397,7 @@ cmake --build build\core --config Release && ctest --test-dir build\core -C Rele
 | 2 | `profile` build succeeds (Editor + Launcher) | `cmake --build --preset profile` | Must |
 | 3 | Gem tests pass | `ctest --preset profile-tests` | Must |
 | 4 | Naming validator clean | `validate_names.py --all` | Must |
-| 5 | Asset Processor batch has 0 failed jobs | `AssetProcessorBatch.exe` [VERIFY exe/flags] → log scan | Must when `Assets/` changed |
+| 5 | Asset Processor batch has 0 failed jobs | `AssetProcessorBatch.exe --platforms=pc --project-path=<repo>\LowTide` ✔ → log scan | Must when `Assets/` changed |
 | 6 | LFS integrity | `git lfs fsck` + no staged non-LFS binary > 5 MB | Must when binaries changed |
 | 7 | Streaming benchmark smoke (from P2) | 2-min testbed route; p99 and hitch thresholds from 05 | Must when `Gems/LowTideStreaming` changed |
 | 8 | ASan run of core + gem tests | `asan` preset | Weekly, and before every phase tag |

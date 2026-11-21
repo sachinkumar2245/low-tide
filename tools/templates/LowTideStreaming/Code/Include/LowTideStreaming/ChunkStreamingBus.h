@@ -6,13 +6,15 @@
  *                                <Name>Requests / <Name>RequestBus convention, docs/03 §2.4)
  *   ChunkStreamingNotifications (lifecycle events for gameplay, missions, HUD, save system)
  *
- * [VERIFY] EBus declaration pattern against O3DE 26.05 docs/source
- *          (Code/Framework/AzCore/AzCore/EBus/EBus.h, BusImpl.h, Policies.h):
- *   - AZ::EBusTraits members HandlerPolicy / AddressPolicy as static constexpr
- *   - AZ::EBus<Interface> alias
- *   - Whether AZ::Interface<ChunkStreamingRequests> registration is preferred over a request bus
- *     for singleton systems in 26.05. If so, keep this class as the interface and register it with
- *     AZ::Interface in Activate(); the method contract below is unchanged.
+ * VERIFIED against O3DE 26.10 source (docs/06 V-42, V-45):
+ *   - AZ::EBusTraits with static constexpr HandlerPolicy / AddressPolicy
+ *     (EBusHandlerPolicy::{Single, Multiple, MultipleAndOrdered}; EBusAddressPolicy::{Single, ById,
+ *     ByIdAndOrdered}); AZ::EBus<Interface> alias; include paths exist.
+ *   - The DefaultGem template ALSO registers system interfaces with AZ::Interface<T>
+ *     (Register/Unregister return InterfaceRegisterOutcome; Interface<T>::Registrar RAII helper).
+ *     Decision: StreamingSystemComponent registers AZ::Interface<ChunkStreamingRequests> in
+ *     Activate as well, for direct calls from C++ (no bus dispatch); the bus stays for script/
+ *     tool access. Both obey the same main-thread contract below.
  *
  * THREADING CONTRACT (both buses):
  *   MAIN THREAD ONLY. Buses use the default (non-thread-safe) mutex policy. Calls from job or
@@ -31,9 +33,9 @@
 #include <LowTideStreaming/ChunkState.h>
 #include <LowTideStreaming/ChunkTypes.h>
 
-#include <AzCore/EBus/EBus.h>          // [VERIFY include path]
-#include <AzCore/Math/Vector2.h>       // [VERIFY include path]
-#include <AzCore/Math/Vector3.h>       // [VERIFY include path]
+#include <AzCore/EBus/EBus.h>
+#include <AzCore/Math/Vector2.h>
+#include <AzCore/Math/Vector3.h>
 
 namespace LowTide::Streaming
 {
@@ -60,7 +62,7 @@ namespace LowTide::Streaming
         : public AZ::EBusTraits
     {
     public:
-        // [VERIFY] trait spelling/values in 26.05.
+        // Verified: O3DE 26.10 EBusTraits (docs/06 V-42).
         static constexpr AZ::EBusHandlerPolicy HandlerPolicy = AZ::EBusHandlerPolicy::Single;
         static constexpr AZ::EBusAddressPolicy AddressPolicy = AZ::EBusAddressPolicy::Single;
 
@@ -131,7 +133,7 @@ namespace LowTide::Streaming
         : public AZ::EBusTraits
     {
     public:
-        // [VERIFY] trait spelling/values in 26.05.
+        // Verified: O3DE 26.10 EBusTraits (docs/06 V-42).
         static constexpr AZ::EBusHandlerPolicy HandlerPolicy = AZ::EBusHandlerPolicy::Multiple;
         static constexpr AZ::EBusAddressPolicy AddressPolicy = AZ::EBusAddressPolicy::Single;
 

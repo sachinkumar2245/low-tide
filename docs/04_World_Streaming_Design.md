@@ -1,11 +1,20 @@
 # FILE: /docs/04_World_Streaming_Design.md
 
-**Project:** LOW TIDE | **Phase:** 1 | **Doc status:** v0.1 | **Engine:** O3DE 26.05.x (03 §2.1)
+**Project:** LOW TIDE | **Phase:** 1 | **Doc status:** v0.2: engine claims checked against the O3DE **26.10.0** source (tag `2610.0`, commit `b6122815`) | **Engine:** O3DE 26.10.0 (03 §2.1)
 
 Labels:
 - **[T]** = tunable starting value, validated by the P2 testbed (05) and P3 profiling.
-- **[VERIFY]** = engine claim to confirm (index in 06 §4.6).
-- ASSUMPTION lines are inputs that haven't been measured yet.
+- **✔ V-nn** = confirmed in the 2610.0 source (evidence in 06 §4.6).
+- **[VERIFY]** = still open (runtime measurement or not settleable from source).
+- ASSUMPTION lines are unmeasured inputs.
+
+**v0.2 changes driven by source verification:**
+1. Atom has **no render thread** and PhysX simulation **blocks the main thread**, so the main-thread budget was rebuilt (§3.0).
+2. Prefab spawns are **not time-sliced**: we slice them with batched `SpawnEntities(indices)`. Queued spawns **can't be cancelled** (§3.3).
+3. Entity-less meshes are viable, but **per-handle cost** rules out 256 k handles. Static kit geometry is **merged offline into per-chunk sections**, and props use instanced handles (§3.4).
+4. Atom LOD is **per mesh** (coverage + decay), with no cross-fade and no shadow LOD (§3.7).
+5. Packed `_ORM` textures are unsupported by StandardPBR, so maps are separate (§3.8).
+6. Probes bake to **R9G9B9E5**, so the probe memory was recomputed (§3.5).
 
 ---
 
@@ -15,20 +24,26 @@ Labels:
 
 | Component | Min spec | Justification |
 |---|---|---|
-| CPU | 6C/12T, 2019-class (Ryzen 5 3600 / Core i5-10400) | Covers main + render submission + I/O + ≥3 job workers (§3.5 threading) |
-| RAM | 16 GB | 6 GB process ceiling plus OS, browser and launcher overhead |
-| GPU | 6 GB VRAM, GTX 1660 Super / RX 5600 XT class, DX12 FL 12_0 [VERIFY Atom minimum feature level] | 4 GB budget + ~2 GB OS/compositor/driver margin |
-| Storage | **SATA SSD (≥ 450 MB/s seq). HDD unsupported** | The streaming math (§3.2) assumes ≥ 150 MB/s *effective* small-block throughput. HDD random reads (~1–5 MB/s effective) can't meet it |
-| OS | Windows 10 22H2 / Windows 11 | O3DE floor is 20H2 |
+| CPU | 6C/12T, 2019-class (Ryzen 5 3600 / Core i5-10400) | The main thread carries game, RPI, physics sync and spawn processing; ≥ 5 job workers for Atom recording/culling, the PhysX solver and asset loads |
+| RAM | 16 GB | 6 GB process ceiling plus OS and background |
+| GPU | 6 GB VRAM, GTX 1660 Super / RX 5600 XT class. Atom requires `D3D_FEATURE_LEVEL_12_0` ✔ V-48. **No ray-tracing hardware assumed**: real-time DiffuseProbeGrid is unavailable (✔ V-61) | 4 GB budget + ~2 GB OS/driver margin |
+| Storage | **SATA SSD (≥ 450 MB/s seq). HDD unsupported** | §3.2 assumes ≥ 150 MB/s effective |
+| OS | Windows 10 22H2 / Windows 11 | — |
 
-### Frame budget at 60 FPS (16.6 ms) on min spec, 1080p [T]
+### Frame budget at 60 FPS (16.6 ms), min spec, 1080p [T]
 
-| Thread / unit | Budget (ms) | Contents |
+**Engine facts:**
+- Atom runs RPI simulate/culling/render tick **on the main thread** and fans work out to jobs. Command lists are recorded on jobs, and each command queue has its own submit thread (✔ V-49).
+- PhysX `Simulate` runs at `TICK_PHYSICS_SYSTEM` (200) and **blocks the main thread** in `FinishSimulation` (✔ V-44).
+- Spawn requests are processed on the main thread at `TICK_GAME` (80) (✔ V-37).
+
+| Unit | Budget (ms) | Contents |
 |---|---|---|
-| **Main (game) thread** | **16.6 total** | Game logic + AI (P3) 4.0 · physics step/sync 2.5 · animation sync 1.0 · **streaming 2.0** (scheduler 0.2 + instantiation 1.5 + deactivation 0.3) · UI 0.5 · audio 0.3 · engine tick/EBus overhead 2.0 · **slack 4.3** |
-| **Render CPU** (Atom RPI/RHI submission + job-recorded command lists) [VERIFY Atom render threading model] | ≤ 12.0 | ≤ 3000 main-view draws + ≤ 1500 shadow draws (§3.8 derivation) |
-| **GPU** | 16.6 | Depth pre/opaque 6.0 · shadows 3.0 · transparency/water 1.5 · post (TAA, tonemap, bloom) 2.0 · other 2.0 · slack 2.1 |
-| **Streaming workers** | Background | ≤ 2 concurrent deserialize jobs, each ≤ 8 ms. I/O in flight ≤ 64 MB |
+| **Main thread** | **16.6** | Input + game + AI (P3) 3.0 · **streaming 2.0** (scheduler 0.2 + instantiation 1.4: spawn-batch processing at TICK_GAME, mesh-handle acquire, physics batch add · deactivation 0.4) · physics simulate wait 2.5 · animation sync 1.0 · **Atom RPI simulate/culling/render tick 4.0** · asset/system tick (incl. `AssetManager::DispatchEvents`) 0.5 · UI 0.5 · audio 0.3 · engine/EBus 1.0 · **slack 1.8** |
+| **Job workers** | Background | Atom command-list recording + culling, PhysX solver, AssetManager load jobs (legacy JobManager), our post-load jobs (TaskGraph) |
+| **GPU** | 16.6 | Depth pre/opaque 6.0 · shadows 3.0 · transparency/water 1.5 · post 2.0 · other 2.0 · slack 2.1 |
+
+The main thread is the binding constraint (risk R4, 06). Slack is only 1.8 ms, which is why streaming work is strictly sliced.
 
 ---
 
@@ -36,192 +51,193 @@ Labels:
 
 ### Precision analysis
 
-float32 has a 24-bit significand. For |x| in [2^e, 2^(e+1)), the spacing between representable values is ULP = 2^(e−23).
+float32 has a 24-bit significand. For |x| in [2^e, 2^(e+1)), ULP = 2^(e−23).
 
-| Distance from origin | ULP | Smallest motion per 60 Hz step (ULP×60) | Pixel size at 0.5 m camera distance (1080p, 60° vFOV)* |
+| Distance from origin | ULP | Smallest motion per 60 Hz step | Pixel size at 0.5 m camera distance (1080p, 60° vFOV) |
 |---|---|---|---|
 | 1 024–2 048 m | 0.122 mm | 7.3 mm/s | 0.53 mm |
 | **2 048–4 096 m** | **0.244 mm** | **14.6 mm/s** | 0.53 mm |
 | 4 096–8 192 m | 0.488 mm | 29.3 mm/s | 0.53 mm |
 | 8 192–16 384 m | 0.977 mm | 58.6 mm/s | 0.53 mm |
 
-\*Pixel footprint = 2·0.5·tan(30°)/1080 ≈ 0.53 mm. This is the inspect-mode close-up worst case (V29).
+**Safety criterion:** ULP ≤ 0.25 mm. Two reasons:
+1. Vertex quantization stays under half a pixel in the inspect-mode close-up.
+2. The slowest resolvable motion (14.6 mm/s) is well below the sleep region. O3DE's default sleep threshold is `m_sleepMinEnergy = 0.005` (✔ V-69); as kinetic energy per unit mass ½v², that equals ≈ 0.1 m/s. Quantization only affects bodies that are about to sleep anyway.
 
-**Safety criterion:** ULP ≤ 0.25 mm. The reasons:
-1. Vertex quantization stays under half a pixel in the closest camera case (inspect mode at 0.5 m).
-2. The slowest resolvable motion (14.6 mm/s) stays below typical rigid-body sleep velocities, so creeping motion is quantized only when bodies are about to sleep anyway [VERIFY PhysX 5 default sleep threshold in O3DE].
-
-**→ Maximum safe distance from origin = 4 096 m** (the last binade where ULP = 0.244 mm).
+**→ Maximum safe distance from origin = 4 096 m.**
 
 ### World extents check
-- World grid = **32 × 32 chunks × 128 m = 4 096 m square**, origin at the grid centre. Coordinates span [−2 048, +2 048] m on X and Y.
-- Worst point (corner): √(2048² + 2048²) = **2 896 m < 4 096 m** ✓.
-- Vertical range is −20 m (sea floor proxy) to +250 m (skyline).
-- The full-vision map (4 × 4 km) fits. The shippable map (~3 × 2.5 km plus the offshore vessel chunk) is a subset.
-- The grid can grow to 5.79 km square (half-diagonal = 4 096 m) before violating the criterion.
+- Grid = **32 × 32 chunks × 128 m = 4 096 m square**, origin at the grid centre. The corner is at **2 896 m < 4 096 m** ✓.
+- The Atom visibility octree root spans ±16 384 m (`bg_octreeMaxWorldExtents`) (✔ V-53), so the world sits well inside it.
+- The grid can grow to 5.79 km square before violating the criterion.
 
 ### Decision: single fixed origin, float32 world positions, chunk-local authored coordinates
 
 | Aspect | Rule |
 |---|---|
-| Runtime positions | Plain float32 world space (engine native) |
+| Runtime positions | float32 world space |
 | Origin | Fixed at the grid centre. **No origin shifting** |
-| Authored data | Chunk content is stored **relative to the chunk origin**. The chunk origin = integer grid coordinate × 128 m, which is exact in float. Chunks stay relocatable for the generator and testbed |
-| Guardrail | Debug/profile assert if any entity's \|x\| or \|y\| exceeds 3 000 m. Playable bounds are enforced by world-edge collision |
-| Time | Game clock is a **double** (accumulated seconds). Shader time is wrapped every 3 600 s, because float seconds lose precision after ~24 h (ULP ≈ 7.8 ms at 86 400 s) |
+| Authored data | Chunk content stored relative to the chunk origin (an exact integer × 128 m) |
+| Guardrail | Debug/profile assert if any entity's \|x\| or \|y\| exceeds 3 000 m |
+| Time | Game clock is a double. Shader time wraps every 3 600 s |
 
-Engine interaction:
-- O3DE `AZ::Vector3` / `AZ::Transform` are float32, and there is no double-precision world build option [VERIFY].
-- PhysX has a native origin-shift API, but O3DE's PhysX gem doesn't expose it as a supported workflow [VERIFY].
-- Atom uses float world-space positions in its view/object constants [VERIFY whether camera-relative rendering exists].
-- None of this matters inside 4 096 m. That's why this decision needs zero engine changes.
+Engine facts that make this the only sane choice:
+- `AZ::Vector3` is float-only, and **no double-precision/large-world option exists** (✔ V-71).
+- PhysX origin shifting is **not exposed** (✔ V-70).
+- Atom uploads float `float3x4` object-to-world and float view positions, with **no camera-relative rendering** (✔ V-50).
 
-**Rejected:**
-- Floating origin: no engine support. Every system (physics scene, render, audio, AI, particles) would need rebase handling, which is unnecessary at < 4 km.
-- Double-precision positions: an engine-wide type change, and not supported.
+*Rejected:* a hand-built floating origin (rebase every transform and re-add every body: no engine support, unnecessary under 4 km); doubles (not available).
 
 ---
 
 ## 3.2 Spatial Partitioning
 
-### Decision: uniform 128 m grid for streaming + two-tier HLOD hierarchy (hierarchical grid)
+### Decision: uniform 128 m grid + two-tier HLOD (hierarchical grid)
 
 | Option | Verdict |
 |---|---|
-| **Uniform grid, 128 m chunks, per-layer radii, HLOD tiers T1 (per chunk) and T2 (4×4-chunk clusters)** | **Selected.** O(1) coordinate→chunk mapping, trivial naming and generation, predictable load units, simple neighbour and seam rules |
-| Quadtree (adaptive cells) | Rejected: variable load units make budgeting and time-slicing unpredictable. Density adaptation is handled by per-district budgets instead |
-| Single-level grid without HLOD | Rejected: no long-distance visibility (prologue skyline, rural sight-lines, open water) |
+| **Uniform 128 m grid, per-layer radii, HLOD T1 (per chunk) and T2 (4×4 clusters)** | **Selected.** O(1) mapping, trivial naming/generation, predictable load units |
+| Quadtree | Rejected: variable load units make slicing and budgeting unpredictable |
+| Single-level grid without HLOD | Rejected: no skyline or long sight-lines |
 
 ### Chunk size derivation (128 m)
 
-Inputs (ASSUMPTION unless stated):
-
 | Input | Value | Source |
 |---|---|---|
-| v_max | 55 m/s (fact, AD-06) | 01 |
-| Effective read throughput, min spec SATA SSD | 150 MB/s [T] | 33% of the 450 MB/s sequential rate (small files, decompression, contention) |
-| Gameplay-layer payload per chunk (worst urban) | 6 MB [T] | Collision + gameplay prefab + chunk data (§3.8) |
-| Static-visual payload per chunk (worst) | 8 MB unique [T] | Unique meshes + probes. Shared kit textures are mostly already resident |
-| Entity activation cost (prefab path) | 25 µs/entity [T] | Unmeasured. **P2 testbed measures this first** |
-| Entities per urban gameplay layer | ≤ 600 (§3.8) | Budget |
-| Main-thread instantiation slice | 1.5 ms/frame | §3.0 |
+| v_max | 55 m/s | AD-06 |
+| Effective read throughput, min spec | 150 MB/s [T] | 33% of SATA sequential |
+| G-layer payload (worst urban) | 6 MB [T] | §3.8 |
+| S-layer payload (worst) | 8 MB [T] | Merged section meshes + probes (§3.4) |
+| Entity spawn+activate cost | 25 µs/entity [T] | **Unmeasured. E1 is the first P2 measurement** |
+| Mesh-handle acquire cost | 20 µs/handle [T] | **Unmeasured.** Each handle creates a ModelDataInstance, MeshLoader, TransformService id, ObjectSrg and octree entry (✔ V-51) |
+| Entities per urban G layer | ≤ 600 | §3.8 |
+| Mesh handles per urban S layer | ≤ 200 merged sections | §3.8 |
+| Main-thread instantiation slice | 1.4 ms/frame | §3.0 |
 
-Per-chunk gameplay-layer ready time (worst):
+**G-layer ready time (worst):**
 - I/O: 6 MB / 150 MB/s = **40 ms**
-- Deserialize (worker): **≈ 30 ms** [T]
-- Instantiate: 600 × 25 µs = 15 ms of main-thread work at 1.5 ms/frame = 10 frames = **167 ms**
-- **T_chunk ≈ 0.24 s**
+- Asset parse (AssetManager load job) + our post-load job: **≈ 30 ms** [T]
+- Spawn: 600 × 25 µs = 15 ms of main-thread work at 1.2 ms/frame of spawn batches = 12.5 frames = **208 ms**
+- **T_chunk ≈ 0.28 s**
 
-Size comparison at an equal minimum lead distance (gameplay layer R_in = 256 m, static R_in = 384 m):
+**S-layer instantiation:** 200 handles × 20 µs = **4 ms** (≈ 3 frames at the remaining slice).
 
-| Chunk size | Chunks resident (static layer, worst) | Per-chunk instantiation (urban) | Verdict |
+| Chunk size | Resident S chunks (worst) | Per-chunk spawn (urban G) | Verdict |
 |---|---|---|---|
-| 64 m | ~169 (13×13) | ~4 ms | Per-chunk overhead dominates: descriptor, prefab spawn, I/O request count, instancing batches split per chunk, seam count ×2 |
-| **128 m** | **~64 (8×8 worst; ~43 euclidean)** | **~15 ms (10 frames)** | **Matches the ~100–150 m city-block authoring unit. Bounded load spikes** |
-| 256 m | ~16 | ~60 ms (40 frames) | Resident area +31% from coarse granularity. Coarse cancellation. Prefabs > 2 000 entities are slow to edit [VERIFY editor prefab scaling] |
+| 64 m | ~169 | ~4 ms | Per-chunk overhead (tickets, asset requests, handles, seams) dominates |
+| **128 m** | **~64 (≈ 43 euclidean)** | **~15 ms (≈ 12.5 frames)** | **Matches the city-block authoring unit; bounded spikes** |
+| 256 m | ~16 | ~60 ms (50 frames) | +31% resident area; coarse cancellation; editor prefab scale |
 
-Resident-area waste for a ring of minimum distance D = (2D + S)². At D = 384 m: S=64 → 0.69 km², S=128 → 0.80 km², S=256 → 1.05 km².
+### Stream-in radius vs. speed vs. load time (straight line at v_max, dense urban)
 
-### Stream-in radius vs. speed vs. load time
-
-Straight-line travel at v_max through dense urban (worst content):
-
-| Quantity | Gameplay layer (R_in 256 m) | Static-visual layer (R_in 384 m) |
+| Quantity | G layer (R_in 256 m) | S layer (R_in 384 m) |
 |---|---|---|
-| New chunks entering radius per 128 m travelled ≈ 2(R_in + 64)/128 + 1 | **6** | **8** |
-| Time to travel 128 m at 55 m/s | 2.33 s | 2.33 s |
-| Demand (chunks/s) | 2.6 | 3.4 |
-| I/O demand | 2.6 × 6 MB = 15.6 MB/s | 3.4 × 8 MB = 27 MB/s |
-| Main-thread demand | 2.6 × 15 ms = 39 ms/s | 3.4 × 6 ms (bulk path) = 20 ms/s |
-| **Combined** | **I/O 43 MB/s = 29% of 150 MB/s.** Main **59 ms/s = 0.98 ms/frame = 65% of the 1.5 ms slice** ✓ | |
-| Diagonal travel (×1.41 chunk crossings) | I/O 41%, main **1.38 ms/frame = 92%** ⚠ worst sustained case | |
+| New chunks per 128 m travelled | 6 | 8 |
+| Time per 128 m at 55 m/s | 2.33 s | 2.33 s |
+| Demand | 2.6 chunks/s | 3.4 chunks/s |
+| I/O | 15.6 MB/s | 27 MB/s |
+| Main-thread work | 2.6 × 15 ms = 39 ms/s | 3.4 × 4 ms = 13.6 ms/s |
+| **Combined** | **I/O 43 MB/s = 29% of 150 MB/s.** Main 53 ms/s = **0.88 ms/frame = 63% of the 1.4 ms slice** ✓ | |
+| Diagonal (×1.41) | I/O 41%, main **1.24 ms/frame = 89%** ⚠ (worst sustained case) | |
 
-Lead-time check (gameplay layer):
+**Lead-time check (G layer):**
 - Time to contact from R_in = 256 m / 55 m/s = **4.65 s**.
-- Worst ready time = queue (6 chunks ahead × 0.167 s serial instantiation = 1.0 s) + T_chunk 0.24 s = **1.24 s**.
-- **Safety factor = 3.7.**
-- Minimum admissible radius: R_in ≥ v_max × T_ready × SF(2) = 55 × 1.24 × 2 = **136 m**. The 256 m choice survives load times up to 3.7× worse than estimated before degradation engages (§3.4).
-- Velocity look-ahead (§3.3) adds a further +v·3 s = 165 m along the travel direction.
+- Worst ready time = queue (6 ahead × 0.208 s) + 0.28 s = **1.53 s**.
+- **Safety factor 3.0.**
+- Minimum admissible R_in = 55 × 1.53 × 2 = **168 m**, so 256 m holds.
+- Velocity look-ahead adds +165 m forward.
 
-Synchronous loads (save-load, mission restart, vignette exit) behind a fade:
+**Synchronous loads behind a fade:**
 - I/O: 36 × 6 MB + 64 × 8 MB = 728 MB → 4.9 s.
-- Main-thread instantiation (unsliced): ≈ 0.9 s.
-- **≈ 6 s**, which meets MVS D9 (≤ 30 s cold load).
+- Unsliced spawn + handles: 36 × 15 ms + 64 × 4 ms ≈ 0.8 s.
+- **≈ 6 s** (MVS D9 ✓).
 
 ### Grid, coordinates and density profiles
 
 | Item | Value |
 |---|---|
-| Grid | 32 × 32 = 1 024 cells. `Chunk_X000_Y000` = SW corner. World min corner of chunk (x,y) = ((x−16)·128, (y−16)·128) |
-| Shippable occupancy | ~4.8 km² land + water ≈ 300–350 non-empty chunks. Empty sea cells hold water only (global) |
-| Prefab/level constraint | The runtime level `L_World` contains **only global entities**. Chunk layers are separate spawnables spawned by the streamer. Authoring uses district context levels (`L_Author_OM`) that instance neighbouring chunk prefabs read-only [VERIFY prefab edit/focus-mode workflow for nested prefabs]. Per-layer prefab entity cap = 1 000 (editor responsiveness) [T] |
+| Grid | 32 × 32 = 1 024 cells. `Chunk_X000_Y000` = SW. Chunk (x,y) min corner = ((x−16)·128, (y−16)·128) |
+| Shippable occupancy | ≈ 300–350 non-empty chunks |
+| Prefab/level constraint | `L_World` holds **only global entities**. Chunk layers are separate spawnables. Authoring uses district context levels. Prefab entity ids are hash-stable while the entity alias is unchanged (✔ V-28). Per-layer prefab cap 1 000 entities [T] (editor responsiveness, [VERIFY] empirically, R9) |
 
-| District profile | Prefab entities (gameplay layer) | Bulk instances (static/detail) | Notes |
+| District profile | G prefab entities | S merged-section handles | D instanced prop handles |
 |---|---|---|---|
-| Dense urban (OM, GM edge) | ≤ 600 | ≤ 4 000 | Occluder-rich, interiors |
-| Industrial (TC) | ≤ 400 | ≤ 3 000 | Large repeated volumes (containers) |
-| Rural (BC) | ≤ 200 | ≤ 6 000 | Vegetation scatter is bulk-only |
-| Water / offshore | ≤ 50 | ≤ 200 | Vessel chunk has an exception (§3.8) |
+| Dense urban (OM, GM edge) | ≤ 600 | ≤ 200 | ≤ 250 |
+| Industrial (TC) | ≤ 400 | ≤ 150 | ≤ 200 |
+| Rural (BC) | ≤ 200 | ≤ 120 (terrain + merged veg clusters) | ≤ 400 (trees as instanced handles) |
+| Water / offshore | ≤ 50 | ≤ 20 | ≤ 20 |
+
+**Global handle cap:** ≤ **24 000 resident mesh handles** [T].
+- Derivation: 64 S × 200 + 16 D × 250 + ~36 G × 100 entity meshes + ~300 dynamic ≈ 20.7 k, plus margin.
+- Atom's `Simulate` walks every handle each frame in jobs (✔ V-51): "thousands fine, hundreds of thousands not". The P2 benchmark measures Simulate ms per 10 k handles (E3).
 
 ### Chunk content taxonomy and residency
 
-Each chunk is split into **layers**. Each layer is an independently streamed unit with its own radius. The state machine (§3.3) runs per (chunk, layer).
-
 | Content | Residency | Layer / radius (R_in / R_out) [T] | Notes |
 |---|---|---|---|
-| Terrain render tile | Per chunk | **S** Static-visual 384 / 448 m | Mesh tiles with LOD0–3 + skirts (§3.7). Terrain gem not used (below) |
-| Terrain + static collision | Per chunk | **G** Gameplay 256 / 320 m | Pre-cooked PhysX meshes and primitives |
-| Static geometry (kit pieces, unique buildings) | Per chunk | **S** | Entity-less bulk path (§3.4) |
-| Collidable props, doors, interactables | Per chunk | **G** | Prefab path (entities) |
-| Decorative detail (litter, decals, small non-collidable props) | Per chunk | **D** Detail 128 / 192 m | Bulk path |
-| Roads: global road graph (lanes, connectivity, closures) | **Global, always resident** | — | Routing, traffic (P3), path prediction for streaming priority |
-| Roads: surface mesh/decals | Per chunk | **S** | — |
-| Navmesh tiles | Per chunk (reserved P3) | **G** | [VERIFY RecastNavigation gem tile add/remove at runtime] |
-| Seamless interior content | Per interior | **I** 48 / 64 m from portal, or camera inside | The shell exterior is part of S |
-| Airlock interior / vignette cells | Per cell | On airlock trigger (preload at 60 m) | Separate spawnables (AD-01, AD-12) |
-| Gameplay triggers / volumes | Per chunk | **G** | Mission triggers are mission-owned (global) |
-| Local lights | Per chunk | **G** (near lights) | Count caps §3.8 |
-| Reflection probes | Per chunk **per lighting state** | **S**, current state only | §3.9 |
-| Sun, sky, fog, global ambient, TOD presets | **Global** | — | — |
-| Audio emitters, reverb zones | Per chunk | **G** | Global: music, weather beds |
-| HLOD T1 (per-chunk proxy) | Per chunk | **H1** 2 000 / 2 200 m | Includes the **coarse collision proxy** (§3.4 fallback) |
-| HLOD T2 (4×4 cluster) + skyline (AD-13) | **Global, always resident** | — | ~30 clusters + skyline |
-| Global water planes, flood level | **Global** | — | AD-02, AD-08 |
-| Global heightmap (2 m) | **Global** | — | 3 × 3.5 km / 2 m = 2.6 M samples × 2 B = **5.3 MB**. Flood depth, AI and audio queries without loaded physics |
-| Chunk descriptor table | **Global** | — | 1 024 × ~64 B ≈ 64 KB |
-| AD-09 variant groups | Inside G/S layer data | — | Evaluated at instantiation; re-evaluated in place on global change |
+| Terrain render tile | Per chunk | **S** 384 / 448 m | Mesh tiles. Ring LOD set via `LodType::SpecificLod` (§3.7) |
+| Terrain + static collision | Per chunk | **G** 256 / 320 m | Entity-less static bodies via `AddSimulatedBodies` (§3.4) |
+| Static kit geometry | Per chunk | **S** | **Merged offline** into section meshes (§3.4) |
+| Collidable props, doors, interactables | Per chunk | **G** | Prefab spawnable (entities) |
+| Decorative props, decals | Per chunk | **D** 128 / 192 m | Instanced mesh handles |
+| Road graph | **Global** | — | Routing, prediction |
+| Road surface mesh | Per chunk | **S** | Part of merged sections |
+| Navmesh tiles (P3) | Per chunk | **G** | Recast exposes only whole-area rebuilds publicly. Per-chunk tiles need our own `addTile`/`removeTile` on the raw `dtNavMesh` (◐ V-79) |
+| Seamless interior content | Per interior | **I** 48 / 64 m from portal | — |
+| Airlock / vignette cells | Per cell | Trigger (preload at 60 m) | — |
+| Triggers / volumes | Per chunk | **G** | Mission triggers are global |
+| Local lights | Per chunk | **G** | §3.8 caps |
+| Reflection probes | Per chunk, per lighting state | **S**, current state only | §3.9 |
+| Sun/sky/fog/TOD presets | **Global** | — | — |
+| Audio emitters/zones | Per chunk | **G** | — |
+| HLOD T1 proxy + coarse collision | Per chunk | **H1** 2 000 / 2 200 m | §3.4 fallback |
+| HLOD T2 + skyline | **Global** | — | — |
+| Water planes, flood level | **Global** | — | — |
+| Global heightmap (2 m) | **Global** | — | 5.3 MB |
+| Chunk descriptor table | **Global** | — | ~64 KB |
+| AD-09 variant groups | In G/S data | — | Evaluated at instantiation; re-evaluated in place |
 
-**Terrain decision:** per-chunk mesh tiles plus cooked collision, not the O3DE Terrain gem.
-- *Why:* our streamer controls every byte. The world is mostly urban.
-- *Trade-off:* no gem splatting/clipmaps, and terrain LODs are authored or generated by our tool.
-- *Rejected:* Terrain gem, because runtime streaming of terrain spawner areas under our scheduler is unverified [VERIFY].
+**Terrain decision:** per-chunk mesh tiles + entity-less cooked collision, not the O3DE Terrain gem.
+- *Source check:* Terrain Layer Spawner components register/unregister their area in Activate/Deactivate, so they **could** be spawned with chunk prefabs. They require box shapes, geometry is sector LOD grids, and clipmaps are for materials only (◐ V-78).
+- *Why we still choose mesh tiles:* the cost of terrain-system re-registration at 2.6 chunks/s is unmeasured, and mesh tiles keep all cost under our scheduler.
+- *Revisit:* P2 week 6, if terrain tile authoring proves expensive.
 
 ---
 
 ## 3.3 Chunk Lifecycle State Machine (per chunk-layer)
 
-### States
+### States and their engine mapping
 
-| State | Meaning | Thread performing work | Memory held |
+| State | Meaning | Thread | Engine mechanism (26.10) |
 |---|---|---|---|
-| `Unloaded` | Descriptor only | — | 0 (descriptor is global) |
-| `Queued` | Wanted; waiting in the priority queue | Main (scheduler) | 0 |
-| `IOPending` | Asset/I/O requests issued | AssetManager / AZ::IO Streamer threads [VERIFY] | Staging buffers |
-| `Deserializing` | ChunkData parsed into the chunk arena; variant selection from a global-state snapshot; delta records matched | Job worker | Arena |
-| `LoadedInactive` | Data in RAM, nothing in the world (warm cache) | — | Arena + asset refs |
-| `Instantiating` | Spawn prefab entities, acquire bulk render handles, add physics actors, apply deltas | **Main, time-sliced** | Arena + engine objects |
-| `Active` | In the world, simulated, visible | — | Full |
-| `Deactivating` | Flush deltas to the store, despawn, release handles and actors | **Main, time-sliced** | Shrinking |
-| `Unloading` | Release asset refs, return arena blocks | Main (cheap) + asset system | → 0 |
-| `Failed` | Retries exhausted; fallback engaged | — | Proxy only |
+| `Unloaded` | Descriptor only | — | — |
+| `Queued` | Wanted, in the priority queue | Main | — |
+| `IOPending` | Assets requested | AssetManager `LoadAssetJob` (legacy JobManager) (✔ V-36) | `Asset<T>` requests for the G/I spawnable + ChunkData asset (custom `AssetHandler`, parse in `LoadAssetData` on the job thread) (✔ V-31) |
+| `Deserializing` | **Post-load preparation** | **TaskGraph** job (✔ V-38) | Variant selection from a global-state snapshot; spawn-batch index lists; transform tables; physics `CreateShape` from cooked `.pxmesh` data [VERIFY CreateShape thread-safety, E4] |
+| `LoadedInactive` | Data resident, nothing in the world | — | Assets held + arena filled. The engine has **no "spawn inactive"** option (✔ V-37), so this state is pre-spawn by design |
+| `Instantiating` | Entering the world, sliced | **Main** | Per frame: `SpawnEntities(ticket, batchIndices)` (≤ 10 entities per batch), `AcquireMesh` batches, `AddSimulatedBodies` batch |
+| `Active` | In the world | — | — |
+| `Deactivating` | Leaving the world, sliced | **Main** | `OnLayerDeactivating` notify → delta flush → `DespawnEntity` batches → `ReleaseMesh` batches → `RemoveSimulatedBodies` |
+| `Unloading` | Release | Main | Drop `Asset<T>` refs; return arena blocks |
+| `Failed` | Fallback engaged | — | Coarse proxy bodies from H1 |
 
-### Must happen on the main thread
-- Entity spawn/despawn (SpawnableEntitiesInterface) [VERIFY threading].
-- Render handle acquire/release [VERIFY MeshFeatureProcessor thread-safety].
-- Physics actor add/remove [VERIFY AzPhysics scene write threading].
-- EBus notifications.
-- State-table writes.
-- Global-state reads for re-evaluation.
+**Asset-ready notifications arrive on the main thread** via `AssetManager::DispatchEvents` in the system tick (✔ V-36). That's where `IOPending → Deserializing` is triggered.
+
+### Tick order and spawn slicing (verified engine order)
+
+| Order | Who | What |
+|---|---|---|
+| 75 `TICK_INPUT` | Engine | Input |
+| **78** | **StreamingSystemComponent** | Scheduler. Queue this frame's spawn batch(es) and handle acquires. Batch-add/remove static bodies |
+| 80 `TICK_GAME` | SpawnableSystemComponent | `ProcessQueue(High \| Regular)` executes the queued batches **this frame** (✔ V-37) |
+| 200 `TICK_PHYSICS_SYSTEM` | PhysX | Simulate; bodies added at 78 are present this step (✔ V-44) |
+
+Rules:
+- **Never queue more than one frame's batch ahead per ticket.** A queued spawn can't be cancelled (✔ V-37), so at most one batch is ever "in flight", which keeps cancellation latency to ≤ 1 frame.
+- Spawn priority: pinned and G layers within 128 m use `SpawnablePriority` ≤ 64 (the high lane, which also runs when the window is unfocused). Everything else uses 128 (Default).
+- Batch boundaries respect entity hierarchy: a batch contains whole root-to-leaf groups. Cross-batch entity references are a [VERIFY] (E1 spike: does id remapping hold across `SpawnEntities` calls on the same ticket?). The fallback is one small spawnable per layer *section*.
+- Focus is consumed from the previous frame (≤ 1 frame ≈ 0.9 m latency at 55 m/s; absorbed by radii).
+- Completion callbacks are written thread-agnostic: they fire on the main thread today, but the interface allows otherwise (✔ V-37).
 
 ### Text state diagram
 
@@ -230,87 +246,85 @@ Each chunk is split into **layers**. Each layer is an independently streamed uni
    ┌──────────┐ ───────────────────────────────▶ ┌────────┐
    │ Unloaded │                                   │ Queued │──cancel (dist > R_out & !pinned)──▶ Unloaded
    └──────────┘ ◀──────────────┐                  └───┬────┘
-        ▲                      │                      │ dequeued (I/O slots + bytes-in-flight available)
+        ▲                      │                      │ dequeued (load slots + bytes-in-flight available)
         │                 ┌────┴─────┐            ┌───▼───────┐
         │                 │ Unloading│◀──cancel───│ IOPending │──timeout/err (retry ≤2, backoff 0.5 s, 2 s)──▶ Failed
-        │                 └────▲─────┘            └───┬───────┘
-        │                      │                      │ all requests complete
+        │                 └────▲─────┘  (drop     └───┬───────┘
+        │                      │        refs)         │ OnAssetReady (main, DispatchEvents)
         │                      │                  ┌───▼──────────┐
         │                      ├──────cancel──────│ Deserializing│──validation err──▶ Failed
-        │                      │                  └───┬──────────┘
+        │                      │                  └───┬──────────┘  (TaskGraph post-load job)
         │                      │                      │ job done (completion queue → main)
         │   evict (LRU / dist  │                  ┌───▼───────────┐
         └──── > R_evict) ──────┴──────────────────│ LoadedInactive│◀──────────────┐
                                                   └───┬───────────┘               │
-                                                      │ want active (dist ≤ R_in)  │ done
+                                                      │ want active               │ done
                                                   ┌───▼──────────┐          ┌─────┴───────┐
                                                   │ Instantiating│─abort*──▶│ Deactivating│
                                                   └───┬──────────┘          └─────▲───────┘
-                                                      │ all slices done           │ dist > R_out & !pinned
+                                                      │ last batch complete       │ dist > R_out & !pinned
                                                   ┌───▼────┐                      │ (+ min dwell 3 s)
                                                   │ Active │──────────────────────┘
                                                   └────────┘
-   Failed ──(player-forced retry after 10 s, or leaves R_out)──▶ Unloading
-   * abort = finish the current slice, then reverse already-created objects in Deactivating
+   Failed ──(retry after 10 s, or leaves R_out)──▶ Unloading
+   * abort = stop issuing batches; the ≤1 in-flight batch completes; then despawn what exists
 ```
 
 ### Transition rules (invariants)
-1. Only the main-thread scheduler writes state. Workers report results through the completion queue.
-2. `Active` is reachable only from `Instantiating`. `Instantiating` only from `LoadedInactive`.
-3. A pinned layer (mission or airlock pin) never leaves `Active` or cancels while pinned.
-4. Each **load cycle** increments the chunk-layer generation, which invalidates all old `ChunkHandle`s (§3.5).
-5. Layer dependency: a chunk's **G layer must be `Active` before its I or D layers instantiate**. S is independent of G (visual can lead or trail). H1 shows whenever S isn't `Active`.
+1. Only the main-thread scheduler writes state.
+2. `Active` only from `Instantiating`; `Instantiating` only from `LoadedInactive`.
+3. Pinned layers never cancel, deactivate or evict.
+4. Generation increments once per load cycle (on `IOPending` entry).
+5. A chunk's G layer must be `Active` before its I/D layers instantiate.
+6. **At most one spawn batch in flight per ticket.**
 
 ### Hysteresis [T]
 
-| Layer | R_in | R_out | R_evict (drop LoadedInactive) | Min dwell |
+| Layer | R_in | R_out | R_evict | Min dwell |
 |---|---|---|---|---|
 | G | 256 m | 320 m | 512 m | 3 s |
 | S | 384 m | 448 m | 640 m | 3 s |
 | D | 128 m | 192 m | 320 m | 2 s |
-| I (seamless interior) | 48 m from portal / inside | 64 m | 128 m | 2 s |
+| I | 48 m (portal) | 64 m | 128 m | 2 s |
 | H1 | 2 000 m | 2 200 m | 2 400 m | 5 s |
-
-- Distances are measured from the player (or the camera for S/D/H1 if farther ahead) to the chunk's 2D AABB.
-- A 64 m band plus minimum dwell stops thrash when circling a boundary. The worst case is one transition per 3 s per layer.
-- The **LoadedInactive cache** is LRU, capped at 256 MB (§3.5). It evicts at R_evict or under pressure.
 
 ### Priority function
 
-Per wanted chunk-layer, compute an **ETA to contact** and sort ascending:
-
 ```text
-d        = distance(player, chunkAABB)                      // meters
-v_along  = max(0, dot(velocity, dirToChunk))                // m/s
-eta_lin  = d / max(v_along, v_walk = 1.5)                    // seconds
-eta_road = pathDistanceAlongRoadPrediction / max(speed, v_walk)
-           // only if the chunk intersects the predicted road path:
-           // horizon 3 s, GPS route if set, else lane-follow with
-           // branch weight 1/n at intersections
+d        = distance(focus, chunkAABB)
+v_along  = max(0, dot(velocity, dirToChunk))
+eta_lin  = d / max(v_along, 1.5)
+eta_road = pathDistanceAlongRoadPrediction / max(speed, 1.5)     // only if on the predicted path (3 s horizon)
 eta      = min(eta_lin, eta_road)
-key      = (pinClass, eta × layerFactor)
-           // pinClass: 0 = mission/airlock pin, 1 = normal
-           // layerFactor: G 1.0, I 1.0, S 1.5, D 3.0, H1 4.0
+key      = (pinClass, eta × layerFactor)                          // G 1.0, I 1.0, S 1.5, D 3.0, H1 4.0
+R_in_eff = R_in + |v| · 3 s · max(0, cosθ)                        // +165 m forward at 55 m/s
 ```
 
-- Look-ahead radius growth along the velocity direction: R_in_eff = R_in + v·3 s·max(0, cosθ). That is +165 m forward at 55 m/s. It never shrinks behind the player.
-- Scheduler cost: a linear SoA scan of the ≤ 1 024 descriptors plus a partial sort of ≤ 128 candidates. ≤ 0.2 ms [T].
+Engine priority mapping:
+- `key` order decides which layers get load slots.
+- Spawn lane: high (≤ 64) for pinClass 0 or G with eta < 2 s, otherwise Default (128).
+- Asset load priority/deadline is passed through `AssetLoadParameters` where supported [VERIFY deadline/priority fields; the IStreamer itself supports both ✔ V-35].
 
-### Cancellation
-- `Queued`: remove from the queue.
-- `IOPending`: cancel streamer requests where supported [VERIFY `AZ::IO::IStreamer` cancel]. Otherwise drop asset refs and discard results on completion.
-- `Deserializing`: set the atomic cancel flag. The job checks it between sections and releases its arena.
-- `Instantiating`: abort at the slice boundary → `Deactivating`.
-- Trigger: distance > **R_out** (not R_in), so minor jitter doesn't cancel useful work.
+### Cancellation (engine-accurate)
+
+| From | Mechanism |
+|---|---|
+| `Queued` | Remove from our queue |
+| `IOPending` | **AssetManager has no cancel.** Drop our `Asset<T>` refs. If the load completes anyway, `OnAssetReady` finds a stale generation and releases |
+| `Deserializing` | Atomic cancel flag checked between job sections; the arena is released |
+| `Instantiating` | Stop issuing batches. The ≤ 1 in-flight batch completes. Then `Deactivating` despawns what exists |
+| (direct streamer reads, if ever used) | `IStreamer::Cancel` is best-effort; handle `RequestStatus::Canceled` *and* late completion (✔ V-35) |
+
+The trigger is distance > **R_out**.
 
 ### Failure / timeout
 
 | Stage | Timeout [T] | Action |
 |---|---|---|
-| IOPending | 5 s | Retry ×2 (backoff 0.5 s, 2 s) → `Failed` |
-| Deserializing | 1 s | Validation failure → `Failed` immediately (data bug, no retry) |
-| Instantiating | 10 s total | Log + continue (slow, not failed). Telemetry flag |
-| `Failed` G layer | — | **Enable the coarse collision proxy** from H1. Log error with chunk id and stage. HUD warning in non-release builds. Retry only after the player leaves R_out or 10 s passes |
+| IOPending | 5 s | Retry ×2 (0.5 s, 2 s) → `Failed` |
+| Deserializing | 1 s | Validation failure → `Failed` immediately |
+| Instantiating | 10 s | Log + continue (telemetry) |
+| `Failed` G layer | — | Enable the coarse collision proxy (H1 data, entity-less bodies). Log. HUD warning. Retry after leaving R_out or after 10 s |
 
 ---
 
@@ -318,54 +332,66 @@ key      = (pinClass, eta × layerFactor)
 
 ### Packaging
 
-| Data | Format | Built by | Loaded via |
+| Data | Product | Built by | Runtime path |
 |---|---|---|---|
-| Gameplay/interactive content (G, I layers, cells) | `.prefab` source → `.spawnable` product | O3DE prefab builder [VERIFY] | AssetManager async load → `SpawnableEntitiesInterface` spawn with an `EntitySpawnTicket` [VERIFY names] |
-| Bulk static + detail data (S, D layers) | Custom **ChunkData** product (`.ltchunk`): SoA instance arrays (mesh id, material id, transform 3×4 float chunk-local), physics primitive lists, variant tables, stable-id tables | Custom AssetBuilder (AssetBuilderSDK) from generator/editor-exported JSON [VERIFY builder registration API] | Custom `AZ::Data::AssetHandler` [VERIFY] → deserialized into the chunk arena |
-| Meshes, materials, textures | Standard Atom products | Asset Processor | Atom (mesh asset loads, streaming images) |
-| Cooked collision | PhysX mesh assets [VERIFY product type] | Asset Processor | AssetManager |
-| Release packaging | **One .pak per district + one global .pak**, files ordered by chunk coordinate for locality | AssetBundler with per-district seed lists [VERIFY AssetBundler/seed-list workflow in 26.05] | Archive system, transparent to AssetManager [VERIFY] |
+| G, I layers, cells (interactive) | `.prefab` → `.spawnable` | PrefabBuilder (✔ V-27) | `SpawnableEntitiesInterface` with an `EntitySpawnTicket`; batched `SpawnEntities` (✔ V-37) |
+| S/D bulk data: section list, instanced-prop tables, cooked collision blobs, variant tables, stable ids | Custom **`.ltchunk`** | Custom builder via `AssetBuilderSDK::AssetBuilderDesc` + `RegisterBuilderInformation` (✔ V-30) | Custom `AZ::Data::AssetHandler` registered with `AssetManager::RegisterHandler` (✔ V-31). Parsing into the chunk arena happens in `LoadAssetData` on the load job thread |
+| Merged section meshes, prop meshes, materials, textures | Atom model/material/image products | Asset Processor | `MeshFeatureProcessorInterface::AcquireMesh` (✔ V-51) |
+| Cooked collision | `.pxmesh` (✔ V-32) or cooked blobs inside `.ltchunk` (`CookTriangleMeshToMemory`) | AP / our builder | `CreateShape(…, CookedMeshShapeConfiguration)` → `AddSimulatedBodies` (✔ V-68) |
+| Release packaging | One .pak per district + global | AssetBundler `seeds`/`assetLists`/`bundles` (✔ V-33) | `GameApplication` opens `@products@/*.pak` (✔ V-33) |
 
-**Bulk entity-less path (decision):**
-- Static kit geometry and decorative props are rendered by acquiring mesh handles directly from the Atom mesh feature processor, with no entity per instance [VERIFY public API usable from a gem].
-- Their collision is added as static actors through the AzPhysics scene interface [VERIFY].
-- Interactive objects stay entities.
-- *Why:* entity activation is the dominant main-thread cost (§3.2).
-- *Fallback if the API proves unusable:* prefab path only, with entity budgets cut 40% (and a re-derived radius).
-- *Rejected:* entities for everything, which caps density at ~600 objects per urban chunk.
+### Static geometry path (decision, revised)
 
-### Scheduling model (per frame, main thread)
+1. **Kit geometry is merged offline.** The `.ltchunk` builder merges every static kit piece in a chunk into **section meshes**: one per (32 m sub-cell × material), with LOD0–3 regenerated per section, 16-bit indices per section, ≤ 200 per urban chunk.
+   - *Why:* Atom's per-handle cost (ModelDataInstance + MeshLoader + TransformService id + ObjectSrg + octree entry, walked by `Simulate` every frame, ✔ V-51) makes 4 000 handles per chunk × 64 chunks (≈ 256 k) non-viable.
+   - *Cost:* merged geometry is unique per chunk, so it gets more VRAM than shared kits (§3.5). Occluder planes are extracted separately.
+2. **Decorative props = instanced handles.**
+   - Requires `r_meshInstancingEnabled=true` (**off by default**, ✔ V-52), shared material instances (`Material::FindOrCreate` / same `m_customMaterials`), `m_useForwardPassIblSpecular = false`, and no `SetSortKey`.
+   - Instances group by {model, LOD, mesh, material instance, sort key}.
+   - With instancing on, `SetDrawItemEnabled` is a no-op, so shadow opt-out is per material (§3.6f).
+3. **Every static handle:**
+   - `m_isRayTracingEnabled = false` (it defaults to **true**).
+   - `SetTransform` once **before** model init (a later change marks the mesh dynamic and adds motion-vector draws).
+   - Acquire and release on the main thread only, never overlapping `MeshFeatureProcessor::Simulate`. There are no locks, only a debug concurrency checker (✔ V-51).
+4. **Static collision** is entity-less:
+   - `StaticRigidBodyConfiguration` + `ShapeVariantData`, then `Scene::AddSimulatedBodies` / `RemoveSimulatedBodies` (✔ V-68).
+   - **Main thread only, outside the physics tick.** PxScene takes write locks, but `m_simulatedBodies` is unguarded.
+   - Shape creation happens on workers during `Deserializing` [VERIFY].
+   - Fallback (R3): prefab path only, with entity budgets −40%.
 
-1. **Update desired set:** SoA scan computes `want` per chunk-layer using radius and hysteresis (§3.3).
-2. **Prioritise:** ETA keys, partial sort.
-3. **Issue I/O:** dequeue while `inFlightLayers < 4` and `bytesInFlight + estBytes ≤ 64 MB` [T]. Requests carry a **deadline = now + ETA − T_ready_est** and a priority class (below) [VERIFY streamer deadline/priority support].
-4. **Dispatch deserialization:** ≤ 2 concurrent jobs [T] via AZ jobs [VERIFY current job/task API in 26.05: `AZ::Job` vs `AZ::TaskGraph`].
-5. **Drain the completion queue** (mutex-guarded, ≤ tens of items per second).
-6. **Instantiate:** process `Instantiating` work items in ETA order until **1.5 ms** elapsed (checked per item; items are pre-split into ≤ 0.25 ms units, e.g. 10 entities or 250 bulk instances).
-7. **Deactivate:** same pattern, 0.3 ms.
-8. **Publish** stats to the budget tracker and HUD (atomics, relaxed).
+### Scheduling model (per frame, main thread, tick order 78)
 
-### I/O priority classes (highest first)
-1. Pinned / G layer collision + gameplay
-2. VO and dialogue audio (small, latency-sensitive: in-car dialogue V39)
-3. S layer
-4. Texture mips (Atom streaming)
-5. D layer
+1. **Desired set:** SoA scan with radius and hysteresis.
+2. **Prioritise:** ETA keys.
+3. **Issue loads:** while `inFlightLayers < 4` and `bytesInFlight + est ≤ 64 MB` [T].
+4. **Drain completions:** asset-ready events received in the previous `DispatchEvents`, plus TaskGraph post-load completions.
+5. **Dispatch post-load jobs:** ≤ 2 concurrent [T] (TaskGraph). AssetManager and PhysX still use the legacy JobManager pool, so the worker split is tuned in P2 (`cl_taskGraph*` CVars, ✔ V-38).
+6. **Instantiate within 1.4 ms:**
+   - ≤ 1 spawn batch per ticket (≤ 10 entities); its cost is charged when TICK_GAME processes it, using a measured EMA.
+   - `AcquireMesh` batches (≤ 50 handles per item).
+   - `AddSimulatedBodies` batches.
+7. **Deactivate within 0.4 ms:** `DespawnEntity` batches, `ReleaseMesh` batches, `RemoveSimulatedBodies`.
+8. **Publish stats.**
+
+### Priority classes (highest first)
+1. Pinned / G
+2. VO
+3. S
+4. Texture mips (Atom streaming priority, `SetStreamingPriority`)
+5. D
 6. H1 prefetch
 
 ### Back-pressure and graceful degradation
 
-**Deficit signal:** for any wanted G-layer chunk, `slack = ETA − T_ready_est`. `T_ready_est` = queue position × measured mean per-chunk times (EMA).
-
 | Level | Trigger [T] | Action | Visible effect |
 |---|---|---|---|
-| L0 | slack ≥ 1.5 s for all G | Normal | — |
-| L1 | Any G slack < 1.5 s | Suspend D and H1 issue. S drops to class 5. Instantiation slice grows to `min(4 ms, 16.6 − lastFrameMsExclStreaming)` | Fewer small props briefly; no hitch |
-| L2 | Any G slack < 0.75 s | Enable the H1 **coarse collision proxy** for G chunks not yet `Active`. S chunks keep showing H1 | Distant buildings show proxy detail longer |
-| L3 | Any G slack < 0.3 s | **Vehicle speed soft-cap** (AD-06 hook): `v_cap = max(15 m/s, (d_unready − 30 m) / T_ready_est)`, applied as a smooth drive-force limiter, not braking | Car feels "governed" for a moment |
-| L4 | Player within 16 m of a G chunk with neither `Active` nor proxy | Freeze simulation + fade to black until ready (target: never). **Logged as a defect** | Visible stall |
+| L0 | All G slack ≥ 1.5 s | Normal | — |
+| L1 | Any G slack < 1.5 s | Suspend D/H1 loads. S drops to class 5. Slice grows to `min(4 ms, 16.6 − lastFrameMsExclStreaming)` | Fewer small props briefly |
+| L2 | Any G slack < 0.75 s | Coarse collision proxies (entity-less) for unready G chunks | Proxy detail longer |
+| L3 | Any G slack < 0.3 s | Vehicle speed soft-cap `v_cap = max(15, (d_unready − 30)/T_ready_est)` | Car "governed" briefly |
+| L4 | Within 16 m of an unready, unproxied G chunk | Freeze + fade until ready. **Logged as a defect** | Stall |
 
-**Fade-in:** S layers appear behind H1 at ≥ 384 m. Popping is minimised by distance, hysteresis and LOD matching (§3.7). No custom dither shader in v1 unless Atom provides one [VERIFY].
+**Fade-in:** Atom has **no dithered/cross-fade LOD** (✖ V-58). S layers appear behind H1 at ≥ 384 m, where the pop is small.
 
 ---
 
@@ -375,16 +401,17 @@ key      = (pinClass, eta × layerFactor)
 
 | Allocator | Source | Used for |
 |---|---|---|
-| `AZ::SystemAllocator` | O3DE [VERIFY current allocator set after the 2023 rework] | Default for engine objects and for our long-lived singletons via `AZ_CLASS_ALLOCATOR` [VERIFY macro] |
-| `AZ::PoolAllocator` / `AZ::ThreadPoolAllocator` | O3DE [VERIFY existence and thread-safety semantics] | Small fixed-size objects allocated by engine glue (bus handlers, small records) |
-| AZStd containers + allocator param | O3DE | All gem containers. Default allocator only in cold paths |
-| **ChunkBlockPool** (custom) | Ours | **192 MB reserved at boot** = 768 × 256 KB blocks [T]. One `VirtualAlloc`-style reservation, uniform blocks → **zero external fragmentation** |
-| **ChunkArena** (custom, linear) | Ours | Per chunk-layer bump allocator over blocks from ChunkBlockPool. Holds all deserialized ChunkData. Freed wholesale (blocks returned) at unload |
-| **FrameScratch** (custom, linear, per thread) | Ours | Main 1 MB, each worker 256 KB. Reset per frame/job. Candidate lists, sort buffers |
-| **Fixed pools** (custom) | Ours | ChunkDescriptor table (fixed array of 1 024), handle slot map (fixed 2 048 slots), work items (fixed 512) |
-| **I/O staging ring** (custom) | Ours | 8 × 8 MB = 64 MB compressed-read staging + 32 MB decompression scratch |
+| `AZ::SystemAllocator` | O3DE (✔ V-39) | Long-lived gem objects via `AZ_CLASS_ALLOCATOR(Type, AZ::SystemAllocator)` |
+| **`LowTideStreamingAllocator`** | `AZ_CHILD_ALLOCATOR_WITH_NAME(…, "LowTideStreaming", "{UUID}", AZ::SystemAllocator)` (✔ V-39) | All gem heap allocations, so they show as one named line in `GetAllocatorStats` and allocation records |
+| `AZ::ThreadPoolAllocator` / `ThreadPoolBase<T>` | O3DE, **thread-safe** (✔ V-39) | Small objects allocated from post-load jobs |
+| `AZ::PoolAllocator` | O3DE, **not thread-safe** (✔ V-39) | Main-thread-only small objects |
+| AZStd containers | O3DE | All gem containers; default allocator only in cold paths |
+| **ChunkBlockPool** | Ours | 192 MB reserved at boot = 768 × 256 KB blocks [T]; uniform blocks; thread-safe acquire/release |
+| **ChunkArena** | Ours | Per chunk-layer linear allocator over pool blocks; holds parsed `.ltchunk` data. Filled by the asset handler's `LoadAssetData` (load job) and the post-load job, with single ownership at each step |
+| **FrameScratch** | Ours | Main 1 MB, workers 256 KB |
+| **Fixed pools** | Ours | Descriptors (1 024), handle slots (2 048), work items (512) |
 
-Rule: **engine-owned objects** (entities, components, render handles, physics actors, asset data) are *not* in our arenas. They are owned through tickets/handles, counted per chunk, and released in `Deactivating`/`Unloading`.
+Engine-owned objects (entities, mesh handles, physics bodies, assets) are owned through tickets/handles, counted per chunk and released in `Deactivating`/`Unloading`.
 
 ### Memory budgets (min spec) [T]
 
@@ -392,253 +419,253 @@ Rule: **engine-owned objects** (entities, components, render handles, physics ac
 
 | Category | MB | Derivation |
 |---|---|---|
-| Engine/runtime baseline (modules, Atom CPU side, PhysX SDK, AZ systems) | 1 500 | ASSUMPTION, deliberately high. **Measured in P2 week 1** on an empty-level launcher |
-| Texture staging / CPU-side residency | 256 | Atom streaming upload staging |
-| Mesh CPU-side buffers | 256 | Asset buffers before upload, plus CPU-readable meshes |
-| Collision (G layers + proxies) | 256 | ~36 G chunks (worst) × ≤ 6 MB + 40 MB proxies |
-| Audio | 192 | 128 MB resident SFX + 64 MB streaming buffers (music, VO) |
-| Animation | 256 | ASSUMPTION: cast + peds motion data (P3 refines) |
-| Entities/components | 192 | 36 × 600 prefab entities + ~300 dynamic ≈ 22 k entities × ~6 KB avg (+ margin) |
-| Chunk arenas (ChunkBlockPool) | 192 | ~116 resident chunk-layers (36 G + 64 S + 16 D) × 1.65 MB avg |
-| LoadedInactive cache | 256 | LRU warm cache of staged data (asset refs + arenas beyond the pool) |
-| Streaming I/O buffers | 96 | Staging ring 64 + decompression 32 |
-| Global resident world data | 128 | Road graph, heightmap 5.3, H2 + skyline, descriptors, water, TOD presets |
-| Navigation (reserved, P3) | 128 | — |
-| AI/traffic (reserved, P3) | 128 | — |
+| Engine/runtime baseline | 1 500 | ASSUMPTION. Measured P2 week 1 with `QueryMemInfo` + `GetAllocatorStats` (✔ V-41) |
+| Texture staging / CPU residency | 256 | — |
+| Mesh CPU-side buffers | 256 | — |
+| Collision (G + proxies) | 256 | 36 × ≤ 6 MB + 40 MB |
+| Audio | 192 | — |
+| Animation | 256 | — |
+| Entities/components | 160 | 36 × 600 prefab entities × ~6 KB + dynamic |
+| **Mesh-handle CPU overhead** | 96 | ≤ 24 k handles × ~4 KB (ModelDataInstance, MeshLoader, SRG CPU side) [T], measured E3 |
+| Chunk arenas (ChunkBlockPool) | 192 | ~116 resident layers × 1.65 MB |
+| LoadedInactive cache | 256 | LRU |
+| Streaming buffers | 96 | — |
+| Global resident world data | 128 | — |
+| Navigation (P3) | 128 | — |
+| AI/traffic (P3) | 128 | — |
 | UI | 96 | — |
-| Game/global state + mission/dialogue data | 64 | Save state < 1 MB + tables |
+| Game state + mission/dialogue | 64 | — |
 | VFX | 96 | — |
-| Frame scratch + job temp | 32 | 1 + 6 × 0.25 MB per frame, double-buffered, plus temp |
-| **Sum** | **4 124** | |
-| **Headroom** | **2 020 (33%)** | Reduce to ≤ 15% after P2/P3 measurement |
+| Frame scratch + job temp | 32 | — |
+| **Sum** | **4 188** | |
+| **Headroom** | **1 956 (32%)** | Reduce to ≤ 15% after measurement |
 
 **VRAM, 4 096 MB ceiling:**
 
 | Category | MB | Derivation |
 |---|---|---|
-| Render targets + swapchain + shadow maps (1080p) | 512 | HDR RGBA16F 16.6 + depth 8 + TAA history 33 + post chain ~60 + directional cascades 4 × 2048² × 4 B = 64 + local shadow atlas 4096² × 4 B = 64 + transient pool ~250 [VERIFY Atom pass attachment sizes via its memory view] |
-| Texture streaming pool | 1 600 | ~40 district trim sets (2K BC7/BC5, 3 maps ≈ 13 MB) = 520 + ~150 prop sets (1K ≈ 3.3 MB) = 500 + hero chars/vehicles 260 + terrain/decals 100 + HLOD atlases 100 = 1 480 full-res, plus margin. Mip streaming trims distant sets [VERIFY Atom streaming image pool budget control] |
-| Mesh vertex/index | 400 | 64 S chunks × 2 MB unique + kits 150 + props 60 + chars/vehicles 60 |
-| Instance/culling buffers | 64 | ~30 k instances × ~100 B + culling data |
-| Reflection probes | 96 | 2 per chunk × ~43 S chunks × 0.52 MB (256² cube BC6H with mips) = 45 MB + global [VERIFY Atom probe format/compression] |
+| Render targets + swapchain + shadows | 512 | Unchanged [VERIFY via the RHI memory view ✔ V-62] |
+| Texture streaming pool (`r_streamingImagePoolBudgetMb`, ✔ V-59) | 1 450 | 2K set = BaseColor **BC1** 2.8 + Normal **BC5** 5.6 + Roughness **BC4** 2.8 = 11.2 MB (preset formats ✔ V-22). Optional Metal/AO +2.8 each (assume 25% of sets). 40 district sets ≈ 476 + 150 prop sets at 1K ≈ 447 + hero 20 × 14 = 280 + terrain/decals 100 + HLOD 100 ≈ 1 403 |
+| **Mesh vertex/index** | **650** | Merged sections are unique per chunk: average urban 200 k LOD0 tris ≈ 120 k verts × 32 B + 600 k × 2 B indices ≈ 5 MB, × 1.5 for LODs = 7.5 MB × 64 S chunks = 480 + props 60 + chars/vehicles 60 + HLOD/terrain 50 |
+| Instance/culling buffers + per-handle SRGs | 96 | ≤ 24 k handles |
+| Reflection probes | 96 | Bake format is **R9G9B9E5** (4 B/texel, ✔ V-60). Chunk probes at **128²** = 0.52 MB each × 2 × 43 = 45 MB + 20 hero/interior probes at 256² (2.1 MB) = 42 MB |
 | VFX | 64 | — |
 | UI | 64 | — |
 | Water/sky/weather | 64 | — |
-| Driver/Atom pools, descriptor heaps, fragmentation | 300 | ASSUMPTION |
-| **Sum** | **3 164** | |
-| **Headroom** | **932 (23%)** | — |
+| Driver/pools/fragmentation | 300 | RHI pools sub-allocate (D3D12MA/free-list); **no defragmentation** (◐ V-64) |
+| **Sum** | **3 296** | |
+| **Headroom** | **800 (20%)** | — |
 
 ### Ownership and lifetime rules
 
-1. **StreamingSystem owns** the ChunkTable (descriptors + runtime records). Each **ChunkLayerRecord owns** its arena, spawn tickets, bulk render handles and physics actor handles. Nothing else owns chunk content.
-2. **External references use `ChunkHandle`** = {ChunkId (u16 grid index), layer (u8), generation (u16)}. A handle resolves only if the record's current generation matches, so stale handles resolve to null. There is no raw `ChunkLayerRecord*` outside the gem.
-3. **Entities are referenced by `AZ::EntityId`** and re-resolved every use. `AZ::Entity*` and component pointers are never cached across frames.
-4. **Persistent and cross-chunk references use `StableId`** = {ChunkId, local authored u32}. Never pointers. Never EntityIds, because spawn regenerates them [VERIFY spawnable entity id regeneration].
-5. **RAII:**
-   - `ChunkArena` returns its blocks in its destructor and asserts `bytesOutstanding == 0` for tracked sub-objects.
-   - `ScopedSpawnTicket`, `ScopedMeshHandle` and `ScopedPhysicsActor` release on destruction and assert on the main thread.
-   - No naked `new`/`delete` in the gem. `AZStd::unique_ptr` with AZ allocators for heap ownership.
-6. **Cross-chunk content is forbidden** in authored data. An object straddling a border belongs to the chunk that contains its pivot. The validator checks that its bounds don't exceed the chunk AABB by more than 16 m [T].
+1. StreamingSystem owns the ChunkTable. Each ChunkLayerRecord owns its arena, `EntitySpawnTicket`, mesh handles, simulated-body handles and `Asset<T>` refs.
+2. External references use `ChunkHandle` {ChunkId, layer, generation}. Stale handles resolve to `Unloaded`.
+3. Entities are referenced by `AZ::EntityId` and re-resolved every use. **Spawning generates fresh EntityIds** (✔ V-28), so EntityIds never persist.
+4. Persistent and cross-chunk references use `StableId` {ChunkId, local u32}.
+5. RAII wrappers (`ScopedSpawnTicket`, `ScopedMeshHandle`, `ScopedSimulatedBodies`) release on destruction and assert on the main thread.
+6. Cross-border objects belong to the pivot's chunk; bounds tolerance 16 m.
 
 ### Hot-path rules
-- **Zero heap allocations** in per-frame scheduler, priority and instantiation-slice code. Enforced in debug by an allocation-counter guard around `StreamingSystem::Tick` (assert if > 0).
-- Containers are **pre-reserved at boot** to grid capacity. `AZStd::fixed_vector` where a bound is known.
-- **SoA descriptor table** (each array ≤ 4 KB for 1 024 chunks): `coordX[] coordY[] (int16)`, `layerState[L][] (uint8)`, `generation[L][] (uint16)`, `etaMs[] (float)`, `flags[] (uint16: pinned, failed, interiorHost…)`, `budgetClass[] (uint8)`.
-- **False sharing:** each job writes only its own `alignas(64)` output record. Atomic stat counters are padded to 64 B. Workers never write the SoA table.
-- No virtual dispatch in the inner scan. Policies (`ILodPolicy`, `ICullingPolicy`, priority) are evaluated per candidate after the scan.
+- Zero heap allocations in the scheduler tick (allocation-counter guard in debug).
+- Pre-reserved containers; SoA descriptor table.
+- `alignas(64)` job outputs; padded atomics.
+- No virtual dispatch in the inner scan.
+- Profiling: `AZ_DECLARE_BUDGET(LowTideStreaming)` / `AZ_DEFINE_BUDGET` + `AZ_PROFILE_SCOPE(LowTideStreaming, "…")`. The first argument is a declared budget (✔ V-76).
 
-### Fragmentation strategy (multi-hour sessions)
-1. All chunk data goes through the uniform ChunkBlockPool. Reuse is exact, so there is no fragmentation by construction.
-2. The bulk path eliminates most per-object engine allocations for static content.
-3. Engine-side variable allocations (entities) are bounded by the per-chunk entity caps. Churn is limited by hysteresis and dwell.
-4. GPU: a fixed-size texture streaming pool. Mesh buffers come from Atom pools [VERIFY Atom buffer pool sub-allocation].
-5. **Verification:** 2 h soak, memory slope < 1 MB/min (MVS D5), plus SystemAllocator fragmentation stats if exposed [VERIFY].
+### Fragmentation strategy
+1. Uniform ChunkBlockPool.
+2. Merged sections + instanced props keep per-object engine allocations bounded.
+3. Hysteresis + dwell limit churn.
+4. A fixed texture pool.
+5. **Engine allocators expose no fragmentation stats** (`GetUnAllocatedMemory()` returns 0, ◐ V-40). The soak proxy is the trend of `reserved − used` per allocator from `GetAllocatorStats`, plus the working-set slope.
 
 ### Leak and corruption detection
-- **Per-chunk tagging:** every arena allocation carries a ChunkId/layer tag (debug/profile).
-- ChunkBudgetTracker counters per chunk-layer: entities spawned/despawned (ticket callbacks), mesh handles acquired/released, physics actors added/removed, asset refs held.
-- **Unload verification:** at `Unloading → Unloaded`, assert all counters are back to zero and `blocksAcquired == blocksReturned`. Profile builds log and continue. Release builds keep counters only.
-- **ASan:** the `win-vs2022-asan` preset runs core tests, gem tests and a 10-minute testbed route weekly. Custom pools call ASan poison/unpoison on block return [VERIFY O3DE allocator compatibility under ASan].
-- **O3DE allocation records:** enabled in profile soak runs to catch leaks into the SystemAllocator [VERIFY settings key/CVar for allocation records in 26.05].
-- **Canary:** in debug, arena blocks carry head/tail guard words checked on return.
+- Per-chunk tags and ChunkBudgetTracker counters (entities, mesh handles, simulated bodies, asset refs, arena blocks). All must be zero at `Unloaded`.
+- **Allocation records:**
+  - Enable with `allocator_tracking_LowTideStreaming=<Mode>` (and per-allocator modes) in a `--startup-cfg-file`, or with `AllocatorManager::SetTrackingForAllocator`.
+  - Dump with `sys_DumpAllocationRecordsToFile`.
+  - Compiled out in `_RELEASE` (◐ V-40).
+- **ASan:** `LY_BUILD_WITH_ADDRESS_SANITIZER=ON` (✔ V-16) on core + gem tests + a 10-minute route weekly. Custom pools poison/unpoison blocks.
+- Debug guard words on arena blocks.
 
 ### Threading model
 
 | Data / operation | Writer | Readers | Synchronisation |
 |---|---|---|---|
-| SoA descriptor + state table | Main only | Main; HUD via snapshot | None (single writer) |
-| Job input (chunk id, file blobs, global-state snapshot for variants) | Main (before dispatch) | Worker | Immutable after dispatch; happens-before via job dispatch |
-| Chunk arena during `Deserializing` | Worker (exclusive) | — | Ownership transfer at dispatch and completion |
-| Completion queue | Workers / I/O callbacks | Main | `AZStd::mutex`, short critical section (≤ 100/s) |
-| Cancel flags | Main | Worker | `std::atomic<bool>` (acquire/release) |
-| Stats counters | Any | HUD | Relaxed atomics, 64 B padded |
-| Engine spawn / render handles / physics add-remove | **Main only** (unless [VERIFY] proves thread-safe) | — | — |
-| EBus requests/notifications | Main only | — | Buses declared single-threaded. Calls from other threads are a contract violation (asserted) |
-| Global gameplay state | Main | Main; workers via snapshot | Snapshot copy |
+| SoA state table | Main | Main, HUD snapshot | Single writer |
+| `.ltchunk` parse into arena | AssetManager load job (`LoadAssetData`) | — | Exclusive until `OnAssetReady` on main |
+| Post-load job input/output | Main → TaskGraph job → main | — | Ownership transfer; completion queue (mutex) |
+| Cancel flags | Main | Jobs | `std::atomic<bool>` |
+| Stats counters | Any | HUD | Relaxed atomics, padded |
+| `SpawnEntities` / `DespawnEntity` requests | Main (tick 78) | Processed main (tick 80) | Engine queue (mutex-protected internally, ✔ V-37) |
+| `AcquireMesh`/`ReleaseMesh`/setters | **Main only, not during Simulate** | — | None in engine (✔ V-51) |
+| `AddSimulatedBodies`/`RemoveSimulatedBodies` | **Main only, outside physics tick** | — | Engine: PxScene write lock; body list unguarded (✔ V-68) |
+| `CreateShape` from cooked data | Post-load job | — | [VERIFY thread-safety, E4] |
+| EBus (ours) | Main only | — | Single-threaded bus (asserted) |
 
 ---
 
 ## 3.6 Culling Pipeline (cheapest first)
 
-| Layer | Provided by | We build | Savings class | Failure modes → mitigation |
+| Layer | Provided by (26.10) | We build | Savings | Failure modes → mitigation |
 |---|---|---|---|---|
-| (a) Chunk streaming cull | — | **Yes**: non-resident = zero cost; layer radii | Very high (everything beyond radius) | Pop-in at speed → ETA priority, look-ahead, H1 swap at ≥ 384 m |
-| (b) Frustum cull | **Atom** visibility system (octree / IVisibilityScene) [VERIFY] | Correct bounds for bulk instances | High (~60–75% of resident objects) | Wrong bounds → validator checks mesh bounds vs. instance transforms |
-| (c) Occlusion | **Atom Occlusion Culling Plane** components, software-rasterized (Masked Occlusion Culling) [VERIFY] | **Authored occluders baked into kit pieces**: 1–2 planes inside each building module's walls. ≤ 32 active occluders/frame, chosen by projected area [T] | High in dense urban (Old Mercy streets, Glass Mile edge), low in rural | Over-cull at speed (stale occlusion) → occluders are static and conservative (inset 0.5 m). Missing occluder → budget report flags urban chunks with < N occluders |
-| (d) Small-object / screen-size cull | Atom mesh LOD min screen coverage [VERIFY] + D-layer radius | Per-class thresholds (§3.7) enforced by the validator | Medium (props/detail) | Visible popping of small props → D layer fades by radius, not screen size, inside 128 m |
-| (e) Interior/exterior cells | — | **Yes**: per-portal rectangle test (in frustum ∧ within 64 m ∧ facing). Interior render group visible only if the camera is inside the cell or a portal passes. In airlock interiors, exterior S layers beyond G are hidden and H1 shows through windows | High inside interiors | Visible interior through a window not on the portal list → every exterior opening is a portal (validator) |
-| (f) Shadow-caster cull | Atom per-cascade culling [VERIFY] | Caster flags: detail props never cast. Props < 1 m stop casting beyond 40 m. H1 only in the last cascade, H2 never. Local shadowed lights ≤ 2 per chunk, ≤ 8 global | High (shadow draws ≈ 50% of main) | Shadow popping at the cascade edge → caster LOD = render LOD + 1, hysteresis |
+| (a) Streaming cull | — | Layer radii | Very high | Pop-in → ETA priority, H1 swap at ≥ 384 m |
+| (b) Frustum | **Atom `CullingScene` over `IVisibilityScene` (octree)** (✔ V-53) | Correct section bounds (32 m sub-cells keep frustum granularity after merging) | High | Oversized merged sections → cap at 32 m cells |
+| (c) Occlusion | **Only `OcclusionCullingPlane` quads occlude**, rasterized by Masked Occlusion Culling at a fixed 1920×1080. Meshes never occlude. No plane cap, no CVar (◐ V-54) | **Occluder planes authored on kit pieces**, extracted by the builder into per-chunk occluder lists and registered when S is Active; ≤ 32 active by projected area [T] [VERIFY plane create/enable API from gem code] | High in dense urban | Over-cull → conservative inset 0.5 m. Missing planes → budget report flags urban chunks with < 8 |
+| (d) Small-object / screen-size | Atom per-mesh `m_minimumScreenCoverage` (culls below it, ✔ V-55) + D radius | Per-class settings (§3.7) | Medium | Popping → D-layer radius fade inside 128 m |
+| (e) Interior/exterior | — | Portal test (frustum ∧ ≤ 64 m ∧ facing) toggling interior visibility (`SetVisible` on interior handles, visibility of interior entities) | High indoors | Openings not on the portal list → validator |
+| (f) Shadow casters | Per-cascade shadow views (≤ 4, ✔ V-56). **No shadow-specific LOD.** Opt-out is the **material** property `castShadows` (`SetDrawItemEnabled` is a no-op with instancing) | **Build-time** caster policy: detail props, HLOD T1/T2 and ground cover use `MI_*_NoShadow` material variants. Local shadowed lights ≤ 2/chunk, ≤ 8 global | High | Distance-based per-instance shadow cutoff isn't available; accepted |
 
-**Occlusion decision (dense urban):** authored occluders on kit pieces + engine software rasterization.
-- *Trade-off:* the occluder authoring cost is paid once per kit piece, not per placement.
-- *Rejected:* GPU Hi-Z (custom render pipeline/shader work, out of scope); full software rasterization of render meshes (CPU cost); precomputed PVS (incompatible with streaming and variants).
+**Occlusion decision:** authored occluder planes on kit pieces + engine MOC.
+- *Rejected:* GPU Hi-Z (render-pipeline work); mesh occluders (not supported by the engine); PVS (incompatible with streaming).
 
 ---
 
 ## 3.7 LOD Strategy
 
-Screen size = projected bounding-sphere diameter / screen height. Thresholds are switch-down points; switch-up = threshold × 1.1 (hysteresis). All values [T].
+**Engine model (✔ V-55, ✖ V-58, ◐ V-56):**
+- LOD selection is **per mesh** through `RPI::Cullable::LodConfiguration`: `m_lodType` (Default / ScreenCoverage / SpecificLod), `m_lodOverride`, `m_minimumScreenCoverage` (default 1/1080), `m_qualityDecayRate` (default 0.5).
+- Per-LOD coverage ranges are derived internally from the decay rate [VERIFY the exact derivation in `MeshFeatureProcessor.cpp`; E3 records switch distances].
+- There is **no per-LOD threshold, no hysteresis, no cross-fade, and no shadow LOD**. Shadow views pick the LOD by their own coverage.
+- **Consequence:** LOD popping is accepted; the decay rate per class is tuned to push switches out to distances where the pop is ≤ ~2 px.
 
-| Class | LOD0 tris (max) | LOD1 | LOD2 | LOD3 | Switch thresholds (LOD0→1 / 1→2 / 2→3 / cull) | Shadow LOD | Beyond LOD3 |
-|---|---|---|---|---|---|---|---|
-| Building kit piece | 5 k | 50% | 25% | 10% | 0.25 / 0.10 / 0.04 / none | Render LOD + 1 | H1 (chunk swap) |
-| Unique building (≤ 12/chunk) | 40 k | 50% | 25% | 10% | 0.30 / 0.12 / 0.05 / none | +1 | H1 |
-| Prop (standard) | 3 k (hero 8 k) | 40% | 15% | — | 0.15 / 0.05 / — / 0.005 | +1; none if < 1 m beyond 40 m | Culled |
-| Vehicle (player/hero) | 80 k | 50% | 20% | 5% (box) | 0.40 / 0.15 / 0.05 / 0.004 | +1 | Culled |
-| Vehicle (traffic) | 40 k | 50% | 20% | 5% | 0.35 / 0.12 / 0.04 / 0.004 | +1 | Culled |
-| Character (reference only; P3) | 50 k hero / 20 k ped | 50% | 20% | 8% | 0.50 / 0.20 / 0.08 / 0.004 | +1 | Culled |
-| Terrain tile (128 m) | 32 k (1 m grid) | 8 k (2 m) | 2 k (4 m) | 512 (8 m) | **By chunk ring, not screen size**: ≤ 128 / 256 / 384 m / H1 | LOD2 | H1 (16 m grid) |
-| Tree | 15 k | 5 k | 1.5 k | cross-card impostor (≤ 16 tris) | 0.30 / 0.12 / 0.05 / 0.01 | LOD2; none for LOD3 | Culled / H1 canopy blob |
-| Grass/ground cover | 200 per clump | — | — | — | D-layer radius only (≤ 40 m) | Never | — |
+| Class | LOD0 tris (max) | LOD1 / LOD2 / LOD3 (authoring ratios) | `minimumScreenCoverage` [T] | `qualityDecayRate` [T] | Beyond |
+|---|---|---|---|---|---|
+| Merged kit section (32 m) | 60 k | 50% / 25% / 10% | 0 (never culled; H1 takes over) | 0.6 | H1 |
+| Unique building (merged) | 40 k | 50% / 25% / 10% | 0 | 0.6 | H1 |
+| Prop (instanced) | 3 k (hero 8 k) | 40% / 15% / — | 0.005 | 0.5 | Culled |
+| Vehicle (player/hero) | 80 k | 50% / 20% / 5% | 0.004 | 0.7 | Culled |
+| Vehicle (traffic) | 40 k | 50% / 20% / 5% | 0.004 | 0.5 | Culled |
+| Character (P3) | 50 k / 20 k | 50% / 20% / 8% | 0.004 | 0.6 | Culled |
+| Terrain tile | 32 k / 8 k / 2 k / 512 | — | 0 | — | `LodType::SpecificLod` set by the streamer per ring (≤ 128 / 256 / 384 m / H1) via `SetMeshLodConfiguration` (✔ V-51) |
+| Tree (instanced) | 15 k | 5 k / 1.5 k / cross-card | 0.01 | 0.5 | Culled / H1 canopy |
+| Ground cover | 200 per clump | — | 0.02 | — | D radius ≤ 40 m |
 
-**HLOD:**
-- **T1 (per chunk):** one merged proxy mesh ≤ 4 k tris + 512² BC7 atlas + coarse collision (≤ 500 tris, roads + building boxes). Shown when the chunk's S layer isn't `Active` and the chunk's cluster is within 1 000 m. The swap is exactly 1:1 per chunk, with no partial overlap.
-- **T2 (4×4 cluster, 512 m):** ≤ 20 k tris + 1K atlas. Shown when the cluster's nearest point is > 1 000 m. Always resident (~30 clusters ≈ 0.6 M tris, ~100 MB including atlases). **Skyline (AD-13)** belongs to the same tier.
-- **Draw-call check:** T1 annulus 384–1 000 m ≈ π(1000² − 384²)/128² ≈ 164 chunks → ≤ 164 draws. T2 ≤ 40 draws.
-- **Generation:** offline, a Blender Python script (P4): merge → decimate → bake atlas → export `HL_` FBX + coarse `_COL`. Rejected: hand-authored HLODs (solo capacity); third-party simplifiers (cost/licensing).
+**HLOD** (our own swap, not Atom LOD):
+- **T1 per chunk:** ≤ 4 k tris + 512² atlas + coarse collision. Shown when S isn't Active and the chunk's cluster is within 1 000 m.
+- **T2 per 4×4 cluster:** ≤ 20 k tris + 1K atlas, beyond 1 000 m. Always resident, together with the skyline.
+- HLOD meshes use `_NoShadow` materials.
+- Draws: T1 ≤ 164, T2 ≤ 40.
+- Generated offline by a Blender script (P4).
 
 **Material/texture LOD:**
-- LOD2+ use a `_Far` material instance (no detail normal, no parallax). H1/H2 use a single atlas material.
-- Mip streaming within the 1 600 MB pool; priority by screen size [VERIFY Atom mip-bias/priority controls].
+- LOD2+ `_Far` material variants are **not available**: a material is per mesh/sub-mesh slot, and LOD selection is internal. *Dropped.*
+- Mip streaming within the pool. Hero textures in inspect mode get `SetTargetMip(0)` + high `SetStreamingPriority`. There is **no hard residency pin** (◐ V-59), so a brief blur on first inspect is accepted.
 
-**Cross-fade:**
-- No custom dithering shader in Phase 1 scope. If Atom provides dithered LOD transitions, enable them [VERIFY]. Otherwise rely on hysteresis bands plus switching distances where the pop is ≤ ~2 px.
+**Authoring pipeline (Blender → O3DE):** node naming is verified (✔ V-20).
+- **Base mesh node = LOD0** (no suffix).
+- `<Name>_LOD1` … `_LOD3` (the engine matches `_lod1`…`_lod5` case-insensitively).
+- Collision node `<Name>_Phys` (matches `_phys`).
+- 1 unit = 1 m, +Z up, transforms applied, triangulated.
+- Sidecar `.ltmeta` manifest + committed `.assetinfo` (JSON scene manifest, ✔ V-21).
 
-**Authoring pipeline (Blender → O3DE):**
-1. One FBX per `SM_`. Mesh nodes `<Name>_LOD0…_LOD3` and `<Name>_COL` [VERIFY O3DE scene builder LOD suffix convention (`_lod1` style) and case sensitivity; rename the exporter output to match if needed].
-2. Units: 1 unit = 1 m, +Z up, transforms applied, triangulated on export.
-3. An exporter script (P4) writes a sidecar manifest `<Name>.ltmeta` (JSON): per-LOD tri counts, material slots, bounds, collision type and size, asset class.
-4. The `.assetinfo` is committed with the LOD and physics mesh groups configured [VERIFY `.assetinfo` scene-manifest schema].
-
-**Validation (`tools/validate_lods.py`, spec):** for each `SM_`/`SK_`/`HL_`:
-- `.ltmeta` exists.
-- LOD count matches the class.
-- Each LOD ≤ 60% of the previous one's tris.
-- LOD0 ≤ the class cap.
-- `_COL` exists if the class is collidable; primitives or ≤ 1 hull of ≤ 32 verts for props.
-- Material slots ≤ class cap.
-- Bounds within the chunk-border tolerance for world pieces.
-
-Output and exit codes as for the naming validator (03 §2.4).
+**Validation (`tools/validate_lods.py`, spec):**
+- LOD count per class; each LOD ≤ 60% of the previous one; LOD0 cap.
+- `_Phys` present for collidable classes (primitives or ≤ 1 hull of ≤ 32 verts for props).
+- Material slot cap; `_NoShadow` material on detail/HLOD classes.
+- Bounds within the border tolerance.
 
 ---
 
 ## 3.8 Map Optimization Rules (per chunk, by district profile) [T]
 
 **Frame-level derivation:**
-- Main-view draw budget 3 000 = ~12 visible full-detail chunks after frustum+occlusion × 200 + H1 164 + H2 40 + dynamic (vehicles, characters, VFX) ~300 + margin.
-- Visible-triangle budget ≈ 6 M main view (min-spec GPU, leaving room for shadows at ~50%).
+- Draw budget 3 000 = ~12 visible full-detail chunks × 200 + H1 164 + H2 40 + dynamic ~300 + margin.
+- Visible triangles ≈ 6 M.
+- Mesh handles ≤ 24 k resident (§3.2).
 
 | Rule | Dense urban | Industrial | Rural | Water | Interior cell |
 |---|---|---|---|---|---|
-| Draw calls (S+G+D at LOD0 distance) | ≤ 250 | ≤ 180 | ≤ 120 | ≤ 30 | ≤ 200 |
-| Triangles, sum of LOD0 | ≤ 500 k | ≤ 400 k | ≤ 400 k (veg) | ≤ 50 k | ≤ 300 k |
+| Draw calls (all layers, near) | ≤ 250 | ≤ 180 | ≤ 120 | ≤ 30 | ≤ 200 |
+| LOD0 triangles (sum) | ≤ 500 k | ≤ 400 k | ≤ 400 k | ≤ 50 k | ≤ 300 k |
+| GPU geometry (all LODs, unique) | ≤ 12 MB | ≤ 10 MB | ≤ 8 MB | ≤ 2 MB | ≤ 10 MB |
 | Unique materials | ≤ 48 (district palette ≤ 120) | ≤ 32 | ≤ 24 | ≤ 8 | ≤ 40 |
-| Unique texture sets outside district trims | ≤ 4 | ≤ 4 | ≤ 2 | ≤ 1 | ≤ 6 |
-| Prefab entities (G) | ≤ 600 | ≤ 400 | ≤ 200 | ≤ 50 | ≤ 400 |
-| Bulk instances (S+D) | ≤ 4 000 | ≤ 3 000 | ≤ 6 000 | ≤ 200 | ≤ 1 500 |
-| Unique (non-kit) meshes | ≤ 12 | ≤ 8 | ≤ 8 | ≤ 2 | ≤ 20 |
-| Local lights: unshadowed / shadowed | ≤ 24 / ≤ 2 | ≤ 16 / ≤ 2 | ≤ 8 / ≤ 1 | ≤ 4 / 0 | ≤ 16 / ≤ 2 |
-| Static collision | ≤ 20 k tris mesh + ≤ 200 primitives | same | ≤ 10 k + 100 | ≤ 1 k | ≤ 15 k + 150 |
-| Occluders | ≥ 8 (kit-provided) | ≥ 4 | 0 | 0 | portals instead |
+| Unique texture sets beyond district trims | ≤ 4 | ≤ 4 | ≤ 2 | ≤ 1 | ≤ 6 |
+| G prefab entities | ≤ 600 | ≤ 400 | ≤ 200 | ≤ 50 | ≤ 400 |
+| S merged-section handles | ≤ 200 | ≤ 150 | ≤ 120 | ≤ 20 | ≤ 150 |
+| D instanced handles | ≤ 250 | ≤ 200 | ≤ 400 | ≤ 20 | ≤ 200 |
+| Local lights unshadowed / shadowed | ≤ 24 / ≤ 2 | ≤ 16 / ≤ 2 | ≤ 8 / ≤ 1 | ≤ 4 / 0 | ≤ 16 / ≤ 2 |
+| Static collision | ≤ 20 k tris + ≤ 200 primitives | same | ≤ 10 k + 100 | ≤ 1 k | ≤ 15 k + 150 |
+| Occluder planes | ≥ 8 | ≥ 4 | 0 | 0 | portals |
 | Audio emitters / reverb zones | ≤ 16 / ≤ 4 | ≤ 16 / ≤ 2 | ≤ 12 / ≤ 1 | ≤ 4 / 0 | ≤ 12 / ≤ 4 |
-| Disk payload, G / S / D (compressed) | ≤ 6 / 8 / 2 MB | same | ≤ 4 / 8 / 3 MB | ≤ 1 / 2 / 0 MB | ≤ 6 / 8 / 2 MB |
-| Arena (deserialized) per layer | ≤ 4 MB | ≤ 4 MB | ≤ 4 MB | ≤ 1 MB | ≤ 4 MB |
-| Variant sites (AD-09) | ≤ 3 | ≤ 3 | ≤ 2 | 0 | ≤ 3 |
+| Disk payload G / S / D | ≤ 6 / 8 / 2 MB | same | ≤ 4 / 8 / 3 MB | ≤ 1 / 2 / 0 MB | ≤ 6 / 8 / 2 MB |
+| Arena per layer | ≤ 4 MB | ≤ 4 MB | ≤ 4 MB | ≤ 1 MB | ≤ 4 MB |
+| Variant sites | ≤ 3 | ≤ 3 | ≤ 2 | 0 | ≤ 3 |
 
 **Rules:**
-1. **Instancing:** any mesh+material pair used ≥ 4× in a chunk **must** use the bulk path. Atom instances identical mesh/material draws [VERIFY GPU instancing behaviour/requirements in 26.05].
-2. **Modular reuse:** ≥ 70% of building façade area comes from kit pieces.
-3. **Trim sheets:** buildings use district trim sheets (2K BC/N/ORM). No texture > 2K without a waiver. The hero 4K waivers are Tyler, Lena, Mack, Rafe, the casino vessel interior, and Mack's car.
-4. **Lighting policy:** no lightmaps (TOD states plus a dynamic sun make baked lightmaps a 3× data multiplier).
-   - Lighting = dynamic sun/moon + per-chunk baked reflection probes per lighting state + emissive materials for neon/windows + capped dynamic lights.
-   - Storm lightning = one global unshadowed directional flash.
-   - Night vehicles: **only the player's headlights cast shadows**. AI headlights are unshadowed, max 12 lit at once by distance.
-   - Atom diffuse GI probe grids are **not used** by default; evaluate in P4 only [VERIFY cost].
-5. **Collision seams:** road and terrain collision vertices on chunk edges are generated identically by the tool on both sides (welded). Dynamic objects never use triangle-mesh colliders.
-6. **Waivers:** stored in `DT_ChunkWaivers.json` with reason and expiry phase. Known waivers: casino vessel (materials ×2), evacuation event (entities ×1.5 while the event is active), Mack's workshop interior (lights ×1.5).
+1. **Static kit pieces are always merged** into 32 m sections by the builder; never one handle per piece.
+2. **Instancing:** project setting `r_meshInstancingEnabled=true`. Props share material instances. No unique runtime material instances on static content (`Material::Create` breaks instancing, ◐ V-84). Unique instances are allowed only on vehicles (paint).
+3. Modular reuse ≥ 70% of façade area (authoring), which still pays off in authoring time and texture memory after merging.
+4. **Textures:**
+   - StandardPBR samples **only `.r`** for roughness, metallic and occlusion (✔ source: `RoughnessInput.azsli:49`, `MetallicInput.azsli:46`, `OcclusionInput.azsli:43`). **No channel packing.**
+   - Maps: `_BC`, `_N`, `_Rough` (mandatory), `_Metal` and `_AO` (only where they vary spatially; otherwise use material factors + SSAO), `_E`, `_H`, `_O`, `_Mask`.
+   - District trim sheets at 2K. > 2K needs a waiver (hero 4K: Tyler, Lena, Mack, Rafe, vessel interior, Mack's car).
+5. **Lighting:**
+   - No lightmaps.
+   - Dynamic sun + per-chunk probes per state + emissive + capped dynamic lights.
+   - Atom uses tiled light culling with **256 lights per tile max** (overflow flickers, ◐ V-57), so the per-chunk caps above keep tiles far below it.
+   - Only the player's headlights cast shadows; AI headlights ≤ 12 lit.
+   - DiffuseProbeGrid **not used** (real-time needs ray tracing; baked mode is a P4 evaluation, ✔ V-61).
+6. Collision seams welded by the tool. No triangle meshes on dynamic objects.
+7. Waivers in `DT_ChunkWaivers.json` (vessel materials ×2, evacuation entities ×1.5, Mack's workshop lights ×1.5).
 
 **Budget report tool (`tools/chunk_budget_report.py`, spec):**
-- **Inputs:** chunk/cell prefabs (JSON), `.ltmeta` manifests, the ChunkData builder's stats JSON (emitted per `.ltchunk`), `DT_ChunkWaivers.json`, district profile table (this section, mirrored in `DT_ChunkBudgets.json`).
+- **Inputs:** prefabs, `.ltmeta`, `.ltchunk` builder stats, waivers, `DT_ChunkBudgets.json`.
 - **Per chunk:**
-  - estimated draws: unique (mesh, material, LOD0) pairs; bulk instance groups count once
-  - LOD0 tris; unique materials and texture sets with estimated VRAM
-  - lights (shadowed/unshadowed); collision tris/primitives
-  - prefab entities, bulk instances, occluders
-  - disk bytes per layer, arena estimate, variant sites
+  - estimated draws; LOD0 tris; GPU geometry MB
+  - S/D handle counts; prefab entities
+  - materials, texture sets + VRAM
+  - lights; collision; occluder planes
+  - disk per layer; arena; variants
 - **Output:**
-  - CSV + Markdown summary (worst 20 chunks, per-district totals, % of budget)
-  - exit code 1 if any chunk is over budget without a valid waiver
-- **When it runs:** pre-push when `Assets/World/` changes (03 §2.5). The in-engine HUD (05) cross-checks runtime numbers against the report. A > 15% divergence is a tool bug.
+  - CSV + Markdown (worst 20, district totals)
+  - exit 1 when over budget without a waiver
+- **When it runs:** pre-push when `Assets/World/` changes.
+- **Runtime cross-check (> 15% divergence = tool bug):**
+  - draw items from `PassSystemInterface::GetFrameStatistics` (✔ V-63)
+  - triangles from pipeline statistics queries
 
 ---
 
 ## 3.9 Day/Night, Weather and Crisis Hooks (streaming/memory only)
 
 **Always resident (global):**
-- TOD lighting state + sun/sky/fog parameters (4 presets × < 1 KB).
-- Weather state and intensity.
-- **Global flood level.**
-- Camera-attached rain particle system.
-- Global wetness parameter.
-- Weather audio beds.
-- Lightning controller.
-- Global water planes.
-- Global heightmap (5.3 MB).
+- TOD state + sun/sky/fog presets.
+- Weather state; **flood level**.
+- Camera-attached rain; wetness constant; weather audio; lightning.
+- Water planes; global heightmap (5.3 MB).
 
 **Per chunk:**
-- **Reflection probes for the current lighting state only.** There are 3 baked probe sets: Day, Twilight, Night. Storm reuses Night plus a global tint, so there's no 4th set.
-- TOD transitions happen only at fades or mission boundaries (AD-07). The new state's probe set for ~43 S chunks ≈ 45 MB loads during the fade (≤ 0.3 s at 150 MB/s).
-- Disk cost: 3 × ~0.5 MB × 2 probes ≈ 3 MB per chunk.
+- Reflection probes for the **current lighting state only**: 3 baked sets (Day, Twilight, Night; Storm reuses Night + tint).
+- Each chunk probe is 128² R9G9B9E5 ≈ 0.52 MB. Per chunk on disk: 3 states × 2 × 0.52 ≈ 3.1 MB.
+- Transition load at a fade: ~43 S chunks × 2 × 0.52 MB ≈ 45 MB, ≤ 0.3 s.
 
-**Act III flooding: recommendation = global flood-level variable (AD-08):**
-1. One camera-centred water surface at height `floodLevel`. A disc of radius 2 km, moved with the camera in 128 m steps to avoid swimming. Terrain and buildings above the level hide it naturally through depth, so there is no per-chunk water geometry.
-2. Material hook: a global per-frame constant (`floodLevel`, `wetness`) that materials *may* read for darkening below the waterline. **Shader implementation is P4 scope.** Only the constant's existence is reserved here.
-3. Gameplay depth = `floodLevel − groundHeight`: from a physics raycast when the G layer is `Active`, otherwise from the global heightmap.
-4. Act III world changes (closures, barricades, closed businesses, emergency spawns) = AD-09 variant groups re-evaluated **in place**, plus road-graph edge closures. **No chunk reloads.**
-
-*Rejected:* swapping per-chunk flooded variants (doubles S/G data, reload hitches during the pursuit in M14); simulated flow (out of scope).
+**Act III flooding (AD-08):**
+1. A camera-centred water disc at `floodLevel`. Depth hides it where the ground is higher.
+2. A global per-frame constant (`floodLevel`, `wetness`) is reserved for materials (shader work is P4).
+3. Gameplay depth comes from a physics raycast (`RayCastRequest` + `QueryScene`, ✔ V-74) when G is Active, or from the global heightmap.
+4. Act III changes = AD-09 variant groups re-evaluated in place + road-graph closures. **No reloads.**
 
 ---
 
 ## 3.10 Save/Load Interaction
 
-**Boundary:** a save = **global state sections** + **chunk delta store**. Live entity state is never serialized. Saves happen only at safehouses/checkpoints with heat = 0, so no in-flight combat or vehicle physics needs saving. Mission state is saved as checkpoint IDs (01 §1.2).
+**Boundary:** a save = global state sections + chunk delta store. No live entity state is saved; saves happen only at safehouses/checkpoints with heat = 0.
 
 | Scope | Content | Persisted when |
 |---|---|---|
-| Global | All 01 §1.2 global rows | Save |
-| Chunk-local | DeltaRecord {StableLocalId u32, kind u8 (door, breakable, container, movedVehicle, pickup), value u16, optional transform (chunk-local float3 + yaw)} | Recorded into the in-RAM delta store when the event happens. Flushed from `Active` layers on save. Persists across unload |
+| Global | 01 §1.2 global rows | Save |
+| Chunk-local | DeltaRecord {StableLocalId, kind, value, optional chunk-local transform} | Recorded at the event; flushed from Active layers on save; persists across unload |
 
-Per-chunk delta cap: 256 records [T]. When the cap is hit, the oldest *cosmetic* kinds (breakables) are evicted first. Gameplay kinds (containers, pickups) are never evicted.
+Delta cap 256 per chunk [T]. Cosmetic kinds are evicted first; gameplay kinds never.
 
 **Format and versioning:**
-- File = `Header {magic 'LTSV', fileVersion u16, gameVersion string, timestamp u64, payloadCRC32}` + TLV sections `{sectionId u32, sectionVersion u16, size u32, payload}`.
-- Each section owns a monotonic `sectionVersion` and a chain of migration functions vN→vN+1. Unknown sections are skipped (forward compatible). Missing sections take defaults.
-- The chunk delta section stores `ChunkContentHash u32` per chunk. On mismatch (content patched), deltas whose StableLocalId no longer exists are dropped and logged.
-- **Custom binary TLV with hand-written versioned readers/writers.** This decouples the save format from engine reflection changes across O3DE upgrades. *Trade-off:* more code. *Rejected:* SerializeContext/JSON reflection for saves (engine-churn coupling) [VERIFY versioning support anyway for tooling export].
+- Header `{'LTSV', fileVersion, gameVersion, timestamp, CRC32}` + TLV sections `{id, version, size, payload}`.
+- Per-section migration chain; unknown sections skipped; missing sections default.
+- `ChunkContentHash` per chunk: deltas whose ids vanished are dropped and logged.
+- **Custom binary TLV.** SerializeContext versioning exists (`ClassBuilder::Version(n, VersionConverter)`, ✔ V-85), but it is still rejected for saves to keep the save format independent of engine reflection churn.
 
-**Interface (declarations only; full headers in Part 4):**
+**Interface (declarations only; headers in `tools/templates/LowTideStreaming/`):**
 
 ```cpp
 namespace LowTide::Save
@@ -653,24 +680,9 @@ namespace LowTide::Save
         virtual SectionId GetSectionId() const = 0;
         virtual uint16_t GetSectionVersion() const = 0;
         virtual bool Write(class SaveWriter& writer) const = 0;
-        virtual bool Read(class SaveReader& reader, uint16_t storedVersion) = 0; // migrates if storedVersion < current
-        virtual void ResetToDefaults() = 0;                                       // section absent in file
+        virtual bool Read(class SaveReader& reader, uint16_t storedVersion) = 0; // migrates if older
+        virtual void ResetToDefaults() = 0;                                       // section absent
     };
 }
-
-namespace LowTide::Streaming
-{
-    struct StableId;          // {ChunkId chunk; uint32_t local;}  (Part 4 ChunkTypes.h)
-    struct ChunkDeltaRecord;  // {uint32_t local; uint8_t kind; uint16_t value; optional transform}
-
-    // Owned by StreamingSystem; persists across chunk unload. Main thread only.
-    class IChunkDeltaStore
-    {
-    public:
-        virtual ~IChunkDeltaStore() = default;
-        virtual void Record(const StableId& id, const ChunkDeltaRecord& record) = 0; // overwrite by id
-        virtual size_t GetDeltas(uint16_t chunkId, const ChunkDeltaRecord*& outRecords) const = 0;
-        virtual void ClearChunk(uint16_t chunkId) = 0;
-    };
-}
+// Chunk delta store: see IChunkDeltaStore.h
 ```

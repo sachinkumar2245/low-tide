@@ -1,22 +1,29 @@
 /*
  * LowTideStreaming - ILodPolicy.h
  *
- * LOD / HLOD selection abstraction for content the streaming gem renders itself (bulk path,
- * HLOD T1/T2). Entity-based meshes use Atom's own LOD selection, configured to the same
- * thresholds via asset settings (04 §3.7).
+ * LOD / HLOD policy for content the streaming gem renders through Atom mesh handles.
  *
- * DEPENDENCIES: C++17 standard library only.
+ * ENGINE MODEL (verified against O3DE 26.10 source, docs/06 V-55, V-56, V-58):
+ *   Atom selects LODs PER MESH via RPI::Cullable::LodConfiguration
+ *   {m_lodType: Default|ScreenCoverage|SpecificLod, m_lodOverride, m_minimumScreenCoverage,
+ *    m_qualityDecayRate}. There are no per-LOD thresholds, no hysteresis, no cross-fade, and no
+ *   separate shadow LOD. Therefore this policy does NOT pick LODs per frame; it supplies
+ *   per-class LodConfiguration values (applied once at AcquireMesh / SetMeshLodConfiguration),
+ *   per-ring forced LODs for terrain tiles, and the HLOD representation choice we own.
+ *
+ * DEPENDENCIES: C++17 standard library only (engine glue converts LodSettings to
+ *               AZ::RPI::Cullable::LodConfiguration).
  *
  * THREADING CONTRACT:
- *   Implementations must be stateless or immutable after construction: all methods are const
- *   and may be called concurrently from job workers (e.g. parallel bulk-instance LOD passes).
+ *   Implementations are immutable after construction; all methods are const and may be called
+ *   from any thread. Applying results to mesh handles is main-thread only (MeshFeatureProcessor
+ *   has no locks).
  *
  * INVARIANTS:
- *   L1 SelectLod applies hysteresis: switching to a finer LOD requires screenSize >=
- *      threshold * lodHysteresisFactor (04 §3.7).
- *   L2 SelectShadowLod(r) >= r (shadows never use a finer LOD than the render LOD).
- *   L3 SelectHlodMode yields exactly one representation per chunk (no double draw):
- *      Full xor Hlod1 xor Hlod2Cluster xor None.
+ *   L1 GetLodSettings is a pure function of AssetClass (stable for the session).
+ *   L2 SelectTerrainLod is monotonic non-decreasing in distance.
+ *   L3 SelectHlodMode yields exactly one representation per chunk:
+ *      Full xor Hlod1 xor Hlod2Cluster xor None (no double draw).
  */
 #pragma once
 
@@ -24,10 +31,10 @@
 
 namespace LowTide::Streaming
 {
-    //! Asset classes with distinct LOD tables (04 §3.7).
+    //! Asset classes with distinct LOD settings (04 §3.7).
     enum class AssetClass : uint8_t
     {
-        BuildingKit = 0,
+        MergedKitSection = 0,
         BuildingUnique,
         Prop,
         VehicleHero,
@@ -36,18 +43,25 @@ namespace LowTide::Streaming
         TerrainTile,
         Tree,
         GroundCover,
+        Hlod,
         Count
     };
 
-    constexpr uint8_t LodCulled = 0xFF;   //!< SelectLod result meaning "do not draw"
-
-    struct LodQuery
+    //! Mirrors RPI::Cullable::LodType.
+    enum class LodMode : uint8_t
     {
-        AssetClass assetClass = AssetClass::Prop;
-        float screenSize = 0.0f;          //!< projected bounding-sphere diameter / screen height
-        float distanceMeters = 0.0f;      //!< used by distance-driven classes (TerrainTile)
-        uint8_t currentLod = 0;           //!< for hysteresis; LodCulled if currently culled
-        uint8_t lodCount = 1;             //!< authored LOD count for this asset
+        EngineDefault = 0,   //!< LodType::Default
+        ScreenCoverage,      //!< LodType::ScreenCoverage (uses the two parameters below)
+        Forced               //!< LodType::SpecificLod (uses forcedLod)
+    };
+
+    //! Mirrors RPI::Cullable::LodConfiguration fields.
+    struct LodSettings
+    {
+        LodMode mode = LodMode::ScreenCoverage;
+        uint8_t forcedLod = 0;                    //!< used when mode == Forced
+        float minimumScreenCoverage = 1.0f / 1080.0f; //!< below this the mesh is culled; 0 = never
+        float qualityDecayRate = 0.5f;            //!< engine-derived per-LOD coverage spacing
     };
 
     enum class HlodMode : uint8_t
@@ -71,11 +85,12 @@ namespace LowTide::Streaming
     public:
         virtual ~ILodPolicy() = default;
 
-        //! Returns LOD index in [0, lodCount) or LodCulled. See L1.
-        virtual uint8_t SelectLod(const LodQuery& query) const = 0;
+        //! See L1. Applied when acquiring a handle of this class.
+        virtual LodSettings GetLodSettings(AssetClass assetClass) const = 0;
 
-        //! Returns shadow LOD for a given render LOD, or LodCulled for "no shadow". See L2.
-        virtual uint8_t SelectShadowLod(AssetClass assetClass, uint8_t renderLod, float distanceMeters) const = 0;
+        //! Forced LOD index for a terrain tile at this distance (ring LOD), see L2.
+        //! The streamer calls SetMeshLodConfiguration only when the result changes.
+        virtual uint8_t SelectTerrainLod(float distanceMeters, uint8_t lodCount) const = 0;
 
         //! See L3.
         virtual HlodMode SelectHlodMode(const HlodQuery& query) const = 0;

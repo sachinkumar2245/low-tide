@@ -7,8 +7,10 @@
  * which overrides these defaults). Units are encoded in member names.
  *
  * DEPENDENCIES: C++17 standard library only. Reflection/serialization is provided by the engine
- * glue (Source/Engine), not in this header. Planned TypeId for reflection:
- * {1FCB43A2-B89D-4CC2-9F2A-2B9C0D8C08A5} [VERIFY AZ_TYPE_INFO_SPECIALIZE usage for external types].
+ * glue (Source/Engine), not in this header. Reflection TypeId:
+ * {1FCB43A2-B89D-4CC2-9F2A-2B9C0D8C08A5}, declared in the glue with
+ * AZ_TYPE_INFO_SPECIALIZE(LowTide::Streaming::ChunkStreamingConfig, "{...}") placed inside
+ * namespace AZ (lookup is via AZ::Adl; docs/06 V-46).
  *
  * THREADING CONTRACT:
  *   Immutable after StreamingSystemComponent::Activate. Readable from any thread without locks.
@@ -67,19 +69,37 @@ namespace LowTide::Streaming
         uint16_t maxCandidatesSorted = 128;
 
         // --- Main-thread budgets (04 §3.0, §3.4) -----------------------------------------------
+        // Instantiation cost includes spawn batches processed by SpawnableSystemComponent at
+        // TICK_GAME (80) in the same frame (charged by measured EMA), AcquireMesh batches and
+        // AddSimulatedBodies batches issued from our tick (order streamingTickOrder).
         float schedulerBudgetMs = 0.2f;
-        float instantiateBudgetMs = 1.5f;
-        float deactivateBudgetMs = 0.3f;
+        float instantiateBudgetMs = 1.4f;
+        float deactivateBudgetMs = 0.4f;
         float instantiateBudgetUnderDeficitMaxMs = 4.0f;
         float frameTargetMs = 16.6f;
         float workItemMaxMs = 0.25f;                 //!< work items pre-split to at most this cost
-        uint16_t workItemMaxEntities = 10;
-        uint16_t workItemMaxBulkInstances = 250;
+        int32_t streamingTickOrder = 78;             //!< after TICK_INPUT (75), before TICK_GAME (80) spawn processing
+                                                     //!< and TICK_PHYSICS_SYSTEM (200) simulate (docs/06 V-37, V-44)
+
+        // --- Spawning (04 §3.3) -----------------------------------------------------------------
+        uint16_t spawnBatchMaxEntities = 10;         //!< per SpawnEntities(indices) call; whole hierarchies only
+        uint8_t spawnBatchesInFlightPerTicket = 1;   //!< invariant: queued spawns cannot be cancelled
+        uint8_t spawnPriorityHigh = 32;              //!< <= engine high-lane threshold (default 64)
+        uint8_t spawnPriorityDefault = 128;
+        float spawnHighLaneEtaSeconds = 2.0f;        //!< G layers with ETA below this use the high lane
+
+        // --- Mesh handles (04 §3.2, §3.4) --------------------------------------------------------
+        uint16_t workItemMaxMeshHandles = 50;        //!< AcquireMesh/ReleaseMesh per work item
+        uint32_t maxMeshHandlesResident = 24000;     //!< global cap (Atom Simulate walks all handles)
+        uint16_t maxStaticSectionsPerChunk = 200;    //!< merged kit sections (S layer), dense urban
+        uint16_t maxDetailHandlesPerChunk = 250;     //!< instanced prop handles (D layer), dense urban
+        float staticSectionCellMeters = 32.0f;       //!< merge granularity (frustum-culling resolution)
+        bool requireMeshInstancing = true;           //!< activation fails if r_meshInstancingEnabled is false
 
         // --- I/O and jobs (04 §3.4) --------------------------------------------------------------
         uint8_t maxLayersInFlight = 4;
         size_t maxBytesInFlight = 64ull * 1024 * 1024;
-        uint8_t maxConcurrentDeserializeJobs = 2;
+        uint8_t maxConcurrentDeserializeJobs = 2;    //!< post-load TaskGraph jobs (parsing itself runs in AssetManager load jobs)
         float deserializeJobMaxMs = 8.0f;
         uint8_t stagingBufferCount = 8;
         size_t stagingBufferBytes = 8ull * 1024 * 1024;
@@ -116,12 +136,12 @@ namespace LowTide::Streaming
         float boatHardCapMps = 25.0f;                //!< AD-11
 
         // --- HLOD / LOD / culling (04 §3.6, §3.7) ---------------------------------------------
+        // Per-class LOD settings live in ILodPolicy (Atom LOD is per mesh; no hysteresis exists).
         uint8_t hlodClusterDim = 4;                  //!< T2 cluster = 4x4 chunks
         float hlodT2SwitchMeters = 1000.0f;
-        float lodHysteresisFactor = 1.1f;
-        uint8_t maxActiveOccluders = 32;
+        float terrainLodRingMeters[3] = {128.0f, 256.0f, 384.0f}; //!< forced terrain LOD 0/1/2 boundaries
+        uint8_t maxActiveOccluders = 32;             //!< occluder planes enabled per frame
         uint8_t maxShadowedLocalLightsGlobal = 8;
-        float smallPropShadowCutoffMeters = 40.0f;
         float interiorPortalMaxMeters = 64.0f;
 
         // --- Persistence (04 §3.10) -------------------------------------------------------------

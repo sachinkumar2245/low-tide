@@ -2,36 +2,42 @@
  * LowTideStreaming - StreamingSystemComponent.h  (PRIVATE header: Source/Engine, not Include/)
  *
  * System component that hosts the streaming system: owns the StreamingSystem implementation
- * (pimpl), handles ChunkStreamingRequestBus, and drives the per-frame scheduler from TickBus.
+ * (pimpl), handles ChunkStreamingRequestBus, registers AZ::Interface<ChunkStreamingRequests>,
+ * and drives the per-frame scheduler from TickBus.
  *
- * [VERIFY] against O3DE 26.05 (Code/Framework/AzCore/AzCore/Component/Component.h, TickBus.h,
- *          and the DefaultGem template's <Gem>SystemComponent.h):
- *   - AZ_COMPONENT vs AZ_COMPONENT_DECL/AZ_COMPONENT_IMPL macro pair
- *   - service function signatures (DependencyArrayType)
- *   - TickBus::Handler OnTick(float, AZ::ScriptTimePoint) and GetTickOrder() / AZ::TICK_* constants
- *   - AZ_CRC_CE for service names
+ * VERIFIED against O3DE 26.10 source (docs/06 V-43, V-44, V-45):
+ *   - Component macros: the DefaultGem template uses AZ_COMPONENT_DECL(Class) in the header and
+ *     AZ_COMPONENT_IMPL(Class, "DisplayName", TypeId) in the .cpp (AZ_COMPONENT also still valid).
+ *     TypeId: {A66E62C0-826D-4340-8D89-6B0DCEB7E8CA}.
+ *   - Service functions take AZ::ComponentDescriptor::DependencyArrayType&; names via AZ_CRC_CE.
+ *   - TickBus::Handler: void OnTick(float, AZ::ScriptTimePoint); int GetTickOrder().
+ *   - Engine order: TICK_INPUT 75, TICK_GAME 80 (SpawnableSystemComponent::ProcessQueue),
+ *     TICK_PHYSICS_SYSTEM 200 (PhysX Simulate, blocking on main thread).
  *
  * THREADING CONTRACT:
  *   Activate/Deactivate/OnTick/bus handlers: main thread only.
- *   Worker jobs are owned by the pimpl'd StreamingSystem and are drained (cancelled + joined)
- *   inside Deactivate before any memory is released.
+ *   Post-load TaskGraph jobs are owned by the pimpl'd StreamingSystem and are cancelled + waited
+ *   for inside Deactivate before any memory is released.
  *
  * LIFETIME:
- *   Activate:   validate config (refuse to activate on failure), reserve ChunkBlockPool and all
- *               fixed pools, connect buses. NO chunk loads until the first SetStreamingFocus.
- *   Deactivate: cancel all in-flight work, synchronously deactivate + unload every layer
- *               (unbudgeted), run leak verification for every layer, disconnect buses, release pools.
+ *   Activate:   validate config (refuse to activate on failure, incl. r_meshInstancingEnabled when
+ *               config.requireMeshInstancing), reserve ChunkBlockPool and fixed pools, register
+ *               AZ::Interface, connect buses. NO chunk loads until the first SetStreamingFocus.
+ *   Deactivate: stop issuing batches, cancel post-load jobs, synchronously despawn / release /
+ *               remove every layer (unbudgeted), run leak verification, unregister, disconnect,
+ *               release pools.
  *
- * TICK ORDER: after gameplay sets focus (game tick), before physics simulate, so newly Active
- *             collision is present for the same frame's step. Exact value chosen in P2 [VERIFY
- *             tick order constants and physics system tick placement].
+ * TICK ORDER: config.streamingTickOrder (default 78): after input, before TICK_GAME so this
+ *             frame's spawn batches are processed this frame, and before physics so newly added
+ *             static bodies take part in this frame's step. Focus is consumed from the previous
+ *             frame's SetStreamingFocus (one-frame latency, absorbed by radii).
  */
 #pragma once
 
 #include <LowTideStreaming/ChunkStreamingBus.h>
 
-#include <AzCore/Component/Component.h>   // [VERIFY include path]
-#include <AzCore/Component/TickBus.h>     // [VERIFY include path]
+#include <AzCore/Component/Component.h>
+#include <AzCore/Component/TickBus.h>
 #include <AzCore/std/smart_ptr/unique_ptr.h>
 
 namespace LowTide::Streaming
@@ -44,8 +50,7 @@ namespace LowTide::Streaming
         , protected AZ::TickBus::Handler
     {
     public:
-        // TypeId generated for this project. [VERIFY macro form]
-        AZ_COMPONENT(StreamingSystemComponent, "{A66E62C0-826D-4340-8D89-6B0DCEB7E8CA}");
+        AZ_COMPONENT_DECL(StreamingSystemComponent);
 
         StreamingSystemComponent();
         ~StreamingSystemComponent() override;

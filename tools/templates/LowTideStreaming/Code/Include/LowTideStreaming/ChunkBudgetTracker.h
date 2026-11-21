@@ -34,7 +34,7 @@ namespace LowTide::Streaming
     {
         Entity = 0,
         MeshHandle,
-        PhysicsActor,
+        SimulatedBody,      //!< AzPhysics simulated body (entity-less static)
         AssetRef,
         ArenaBlock,
         Count
@@ -68,7 +68,9 @@ namespace LowTide::Streaming
         uint32_t arenaBlocksInUse = 0;
         uint64_t loadedInactiveCacheBytes = 0;
         uint32_t entitiesLive = 0;
-        uint32_t bulkInstancesLive = 0;
+        uint32_t meshHandlesLive = 0;              //!< vs config.maxMeshHandlesResident
+        uint32_t simulatedBodiesLive = 0;          //!< entity-less static bodies
+        float spawnProcessingMsEma = 0.0f;         //!< measured engine cost of our spawn batches at TICK_GAME
         uint32_t failedLayers = 0;
         uint32_t transitionsThisFrame = 0;
     };
