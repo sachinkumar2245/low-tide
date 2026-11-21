@@ -152,15 +152,20 @@ git check-attr filter -- LowTide/Assets/test.fbx assets_source/blender/test.blen
 Then add docs/tools, create the O3DE project (§2.5), commit, and push:
 
 ```bat
-gh repo create low-tide --private --source . --remote origin
+gh repo create low-tide --public --source . --remote origin
 git push -u origin main
 ```
+
+**Done (2026-11-21):** public repo https://github.com/sachinkumar2245/low-tide. G8 passed on macOS: SHA-256 match, `git lfs fsck` OK.
+
+**Every new machine (once, user-level):** run `git lfs install` *before* cloning. Without it, a clone silently checks out ~130-byte pointer stubs instead of the binaries. The `--local` install above only covers the original working copy. If you've already cloned without it, run `git lfs install --local && git lfs pull` inside the clone.
 
 **LFS verification (Exit Gate item):**
 
 ```bat
 :: commit a known binary first, e.g. assets_source/reference/LFS_Probe.png
 git lfs ls-files
+git lfs install
 cd %TEMP% && git clone <origin-url> lt_verify && cd lt_verify
 git lfs ls-files
 git lfs fsck
