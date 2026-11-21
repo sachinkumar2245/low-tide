@@ -33,8 +33,8 @@ L = likelihood, I = impact (H/M/L).
 | G4 | **MVS signed off by owner** (Old Mercy, 3 vehicles, Prologue + M2, criteria D1–D11) | ☐ owner |
 | G5 | Owner decisions recorded: adult-content policy for v1.0; Briar contingency trigger | ☐ owner |
 | G6 | Engine 26.05.x built from source at the pinned tag; Editor + Asset Processor launch | ☐ |
-| G7 | Repo initialised. `.gitattributes`/`.gitignore` committed. `core.hooksPath` set | ☐ (files written; `git init` not run) |
-| G8 | **LFS verified by cloning to a clean directory** (03 §2.3 procedure; SHA-256 match, `git lfs fsck` OK) | ☐ |
+| G7 | Repo initialised. `.gitattributes`/`.gitignore` committed. `core.hooksPath` set | ☑ 2026-11-21: public repo `sachinkumar2245/low-tide`, `main` pushed |
+| G8 | **LFS verified by cloning to a clean directory** (03 §2.3 procedure; SHA-256 match, `git lfs fsck` OK) | ☑ 2026-11-21 (macOS): probe PNG SHA-256 match, `git lfs fsck` OK. Re-run on the Windows dev machine after `git lfs install` there |
 | G9 | O3DE project `LowTide` + gem `LowTideStreaming` created; headers copied from `tools/templates` | ☐ |
 | G10 | **Interface headers compile in an empty gem** (MSVC, profile build, one TU including all 11 headers) | ☐ (std-only headers pass clang C++17/20 `-Werror` syntax check) |
 | G11 | Naming validator spec written (03 §2.4); LOD validator + budget report specs written (04 §3.7, §3.8) | ☑ written |
