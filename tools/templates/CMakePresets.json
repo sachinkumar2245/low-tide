@@ -1,0 +1,52 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "win-vs2022",
+      "displayName": "Windows / VS2022 / multi-config (debug, profile, release)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/windows",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "debug;profile;release",
+        "LY_UNITY_BUILD": "ON"
+      }
+    },
+    {
+      "name": "win-vs2022-mono",
+      "displayName": "Windows / VS2022 / monolithic game launcher (release builds)",
+      "inherits": "win-vs2022",
+      "binaryDir": "${sourceDir}/build/windows_mono",
+      "cacheVariables": {
+        "LY_MONOLITHIC_GAME": "ON"
+      }
+    },
+    {
+      "name": "win-vs2022-asan",
+      "displayName": "Windows / VS2022 / AddressSanitizer (debug only)",
+      "inherits": "win-vs2022",
+      "binaryDir": "${sourceDir}/build/windows_asan",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "debug",
+        "LY_UNITY_BUILD": "OFF",
+        "CMAKE_CXX_FLAGS_INIT": "/fsanitize=address"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug",   "configurePreset": "win-vs2022", "configuration": "debug",   "targets": ["Editor", "LowTide.GameLauncher"] },
+    { "name": "profile", "configurePreset": "win-vs2022", "configuration": "profile", "targets": ["Editor", "LowTide.GameLauncher", "AssetProcessorBatch"] },
+    { "name": "release", "configurePreset": "win-vs2022-mono", "configuration": "release", "targets": ["LowTide.GameLauncher"] },
+    { "name": "asan",    "configurePreset": "win-vs2022-asan", "configuration": "debug", "targets": ["LowTide.GameLauncher"] }
+  ],
+  "testPresets": [
+    {
+      "name": "profile-tests",
+      "configurePreset": "win-vs2022",
+      "configuration": "profile",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "name": "LowTide" } }
+    }
+  ]
+}
